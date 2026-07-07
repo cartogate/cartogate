@@ -1,0 +1,3498 @@
+{
+  "hypotheses": {
+    "V1": {
+      "bucket": "A",
+      "claim": "An agent answers codebase questions with fewer tokens when Cartogate's tools are available than when it must read/grep the source.",
+      "id": "V1",
+      "metric": {
+        "corpus": "click",
+        "model": "claude-sonnet-4-6",
+        "overall_token_reduction_pct": 78.3,
+        "tasks": [
+          {
+            "id": "impact",
+            "kind": "impact",
+            "token_reduction_pct": 83.1,
+            "with_correct": 0,
+            "with_cartogate_tokens": {
+              "mean": 3850.0,
+              "n": 3,
+              "stdev": 20.2
+            },
+            "with_turns_mean": 2.0,
+            "without_correct": 0,
+            "without_cartogate_tokens": {
+              "mean": 22794.0,
+              "n": 3,
+              "stdev": 25307.6
+            },
+            "without_turns_mean": 7.7
+          },
+          {
+            "id": "duplicate",
+            "kind": "duplicate",
+            "token_reduction_pct": 67.2,
+            "with_correct": 3,
+            "with_cartogate_tokens": {
+              "mean": 3275.7,
+              "n": 3,
+              "stdev": 20.0
+            },
+            "with_turns_mean": 2.0,
+            "without_correct": 1,
+            "without_cartogate_tokens": {
+              "mean": 9979.0,
+              "n": 3,
+              "stdev": 334.9
+            },
+            "without_turns_mean": 3.0
+          }
+        ],
+        "trials_per_arm": 3,
+        "with_cartogate_tokens": {
+          "mean": 3562.8,
+          "n": 6,
+          "stdev": 315.1
+        },
+        "without_cartogate_tokens": {
+          "mean": 16386.5,
+          "n": 6,
+          "stdev": 17478.6
+        }
+      },
+      "notes": "Token counts are exact (API usage field); means \u00b1 stdev over trials. Model output is non-deterministic \u2014 re-run for fresh draws.",
+      "passed": true,
+      "reproduce": "python -m evaluation.run_ab --trials 3 --model claude-sonnet-4-6",
+      "title": "Token usage (live agent, with vs. without Cartogate)"
+    },
+    "V10": {
+      "bucket": "C",
+      "claim": "check_duplicate latency stays flat as the codebase grows (indexed O(1) lookup).",
+      "id": "V10",
+      "metric": {
+        "curve": {
+          "1000": {
+            "n": 3000,
+            "p50_ms": 0.0516,
+            "p95_ms": 0.10715,
+            "p99_ms": 0.192055
+          },
+          "10000": {
+            "n": 3000,
+            "p50_ms": 0.056,
+            "p95_ms": 0.149705,
+            "p99_ms": 0.499834
+          },
+          "50000": {
+            "n": 3000,
+            "p50_ms": 0.0522,
+            "p95_ms": 0.066825,
+            "p99_ms": 0.146075
+          }
+        },
+        "max_p95_ms": 0.149705,
+        "sizes": [
+          1000,
+          10000,
+          50000
+        ],
+        "slo_p95_ms": 50.0
+      },
+      "notes": "A grep/scan baseline grows linearly with the tree; the indexed gate does not.",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_scaling.py",
+      "title": "Scaling (flat gate latency)"
+    },
+    "V2": {
+      "bucket": "A",
+      "claim": "Warm graph queries answer in well under a millisecond \u2014 far faster than scanning the source tree, and orders under the 50ms in-loop SLO.",
+      "id": "V2",
+      "metric": {
+        "check_duplicate_ms": {
+          "n": 2000,
+          "p50_ms": 0.0915,
+          "p95_ms": 0.2102,
+          "p99_ms": 0.52245
+        },
+        "find_references_ms": {
+          "n": 500,
+          "p50_ms": 0.2185,
+          "p95_ms": 0.42631,
+          "p99_ms": 1.11919
+        },
+        "find_references_speedup_vs_grep": 824.0,
+        "grep_baseline_ms": {
+          "n": 20,
+          "p50_ms": 180.03835,
+          "p95_ms": 255.34374,
+          "p99_ms": 300.26787
+        },
+        "indexed": "src/cartogate",
+        "slo_p95_ms": 50.0
+      },
+      "notes": "Index time is off the gate's latency budget (warm-resident store), per the SLO design.",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_latency.py",
+      "title": "Query latency (graph vs grep)"
+    },
+    "V3": {
+      "bucket": "A",
+      "claim": "Against pyright's references on a real repo, Cartogate matches with far higher precision than name-grep; its recall gap is the re-exports/inferred receivers it soundly skips.",
+      "id": "V3",
+      "metric": {
+        "corpus": "click 8.1.7",
+        "cartogate": {
+          "f1": 0.8966,
+          "fn": 15,
+          "fp": 0,
+          "precision": 1.0,
+          "recall": 0.8125,
+          "tp": 65
+        },
+        "grep_baseline": {
+          "f1": 0.7183,
+          "fn": 29,
+          "fp": 11,
+          "precision": 0.8226,
+          "recall": 0.6375,
+          "tp": 51
+        },
+        "oracle": "pyright (independent of jedi)",
+        "per_symbol": [
+          {
+            "cartogate": {
+              "f1": 0.0,
+              "fn": 2,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "symbol": "click._compat.auto_wrap_for_ansi",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "symbol": "click._compat.get_best_encoding",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._compat.get_binary_stderr",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._compat.get_binary_stdin",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._compat.get_binary_stdout",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "symbol": "click._compat.get_text_stderr",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._compat.get_text_stdin",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._compat.get_text_stdout",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._compat.is_ascii_encoding",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 3
+            },
+            "grep": {
+              "f1": 0.8571,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.75,
+              "recall": 1.0,
+              "tp": 3
+            },
+            "symbol": "click._compat.isatty",
+            "truth_files": 3
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 3
+            },
+            "grep": {
+              "f1": 0.8571,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.75,
+              "recall": 1.0,
+              "tp": 3
+            },
+            "symbol": "click._compat.open_stream",
+            "truth_files": 3
+          },
+          {
+            "cartogate": {
+              "f1": 0.8571,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.75,
+              "tp": 3
+            },
+            "grep": {
+              "f1": 0.8571,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.75,
+              "tp": 3
+            },
+            "symbol": "click._compat.should_strip_ansi",
+            "truth_files": 4
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 4
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 4
+            },
+            "symbol": "click._compat.strip_ansi",
+            "truth_files": 4
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "grep": {
+              "f1": 0.8,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.6667,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "symbol": "click._compat.term_len",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._termui_impl.Editor",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 0.6667,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.5,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "symbol": "click._termui_impl.ProgressBar",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 0.0,
+              "fn": 2,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "grep": {
+              "f1": 0.8,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.6667,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "symbol": "click._termui_impl.getchar",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._termui_impl.open_url",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._termui_impl.pager",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 0.0,
+              "fn": 2,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "grep": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "symbol": "click._termui_impl.raw_terminal",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click._textwrap.TextWrapper",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 12
+            },
+            "grep": {
+              "f1": 0.5882,
+              "fn": 7,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.4167,
+              "tp": 5
+            },
+            "symbol": "click.core.Argument",
+            "truth_files": 12
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 5
+            },
+            "grep": {
+              "f1": 0.8889,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.8,
+              "tp": 4
+            },
+            "symbol": "click.core.BaseCommand",
+            "truth_files": 5
+          },
+          {
+            "cartogate": {
+              "f1": 0.8293,
+              "fn": 7,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.7083,
+              "tp": 17
+            },
+            "grep": {
+              "f1": 0.2667,
+              "fn": 20,
+              "fp": 2,
+              "precision": 0.6667,
+              "recall": 0.1667,
+              "tp": 4
+            },
+            "symbol": "click.core.Command",
+            "truth_files": 24
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "click.core.CommandCollection",
+            "truth_files": 1
+          }
+        ],
+        "symbols_scored": 25
+      },
+      "notes": "Micro-averaged over scored symbols. File granularity (Cartogate returns referencing symbols, pyright returns occurrences).",
+      "passed": true,
+      "reproduce": "python -m evaluation.realstudy.run_realstudy --sample 25",
+      "title": "Navigation accuracy (find_references vs pyright oracle)"
+    },
+    "V3_fixture": {
+      "bucket": "A",
+      "claim": "Cartogate recovers the true referencing files with higher precision than name-grep.",
+      "id": "V3_fixture",
+      "metric": {
+        "cartogate": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 3
+        },
+        "cartogate_units": [
+          "api.py",
+          "auth.py",
+          "test_auth.py"
+        ],
+        "grep_baseline": {
+          "f1": 0.75,
+          "false_negative": 0,
+          "false_positive": 2,
+          "precision": 0.6,
+          "recall": 1.0,
+          "true_positive": 3
+        },
+        "grep_units": [
+          "api.py",
+          "auth.py",
+          "billing.py",
+          "helpers.py",
+          "test_auth.py"
+        ],
+        "target": "proj.auth.validate",
+        "truth_units": [
+          "api.py",
+          "auth.py",
+          "test_auth.py"
+        ]
+      },
+      "notes": "Grep false-positives: helpers.py (comment) and billing.py (a different symbol).",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_nav_accuracy.py",
+      "title": "Navigation accuracy (find_references vs grep) \u2014 illustrative fixture"
+    },
+    "V3_go_fixture": {
+      "bucket": "A",
+      "claim": "On Go, Cartogate recovers the true referencing files more precisely than name-grep.",
+      "id": "V3_go_fixture",
+      "metric": {
+        "cartogate": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 3
+        },
+        "cartogate_units": [
+          "api.go",
+          "auth.go",
+          "auth_test.go"
+        ],
+        "grep_baseline": {
+          "f1": 0.8571,
+          "false_negative": 0,
+          "false_positive": 1,
+          "precision": 0.75,
+          "recall": 1.0,
+          "true_positive": 3
+        },
+        "grep_units": [
+          "api.go",
+          "auth.go",
+          "auth_test.go",
+          "billing.go"
+        ],
+        "target": "proj_go.auth.Validate",
+        "truth_units": [
+          "api.go",
+          "auth.go",
+          "auth_test.go"
+        ]
+      },
+      "notes": "Grep false-positive: billing.go (a different Validate symbol).",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_go_fixture.py",
+      "title": "Navigation accuracy (find_references vs grep) \u2014 Go fixture"
+    },
+    "V3_jmespath": {
+      "bucket": "A",
+      "claim": "Against pyright's references on a real repo, Cartogate matches with far higher precision than name-grep; its recall gap is the re-exports/inferred receivers it soundly skips.",
+      "id": "V3_jmespath",
+      "metric": {
+        "corpus": "jmespath 1.0.1",
+        "corpus_kind": "library",
+        "cartogate": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tp": 23
+        },
+        "grep_baseline": {
+          "f1": 0.5556,
+          "fn": 3,
+          "fp": 29,
+          "precision": 0.4082,
+          "recall": 0.8696,
+          "tp": 20
+        },
+        "oracle": "pyright (independent of jedi)",
+        "per_symbol": [
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.and_expression",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.5,
+              "fn": 0,
+              "fp": 2,
+              "precision": 0.3333,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.comparator",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.current_node",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.4,
+              "fn": 0,
+              "fp": 3,
+              "precision": 0.25,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.expref",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "grep": {
+              "f1": 0.5,
+              "fn": 1,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 0.5,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.field",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.filter_projection",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.4,
+              "fn": 0,
+              "fp": 3,
+              "precision": 0.25,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.flatten",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.function_expression",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.identity",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.5,
+              "fn": 0,
+              "fp": 2,
+              "precision": 0.3333,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.index",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.index_expression",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.key_val_pair",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "grep": {
+              "f1": 0.4,
+              "fn": 1,
+              "fp": 2,
+              "precision": 0.3333,
+              "recall": 0.5,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.literal",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.multi_select_dict",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.multi_select_list",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.not_expression",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "grep": {
+              "f1": 0.5,
+              "fn": 1,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 0.5,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.or_expression",
+            "truth_files": 2
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.5,
+              "fn": 0,
+              "fp": 2,
+              "precision": 0.3333,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.pipe",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.projection",
+            "truth_files": 1
+          },
+          {
+            "cartogate": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "grep": {
+              "f1": 0.5,
+              "fn": 0,
+              "fp": 2,
+              "precision": 0.3333,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "symbol": "jmespath.ast.slice",
+            "truth_files": 1
+          }
+        ],
+        "symbols_scored": 20
+      },
+      "notes": "Micro-averaged over scored symbols. File granularity (Cartogate returns referencing symbols, pyright returns occurrences).",
+      "passed": true,
+      "reproduce": "python -m evaluation.realstudy.run_realstudy --corpus jmespath --sample 25",
+      "title": "Navigation accuracy (find_references vs pyright oracle)"
+    },
+    "V4": {
+      "bucket": "B",
+      "claim": "On objectively-labeled cases built from real symbols, the gate catches true duplicates without false-flagging different-signature or method-named functions; name-grep over-blocks both.",
+      "id": "V4",
+      "metric": {
+        "cases": [
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_AtomicFile()"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_AtomicFile(_rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_FixupStream()"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_FixupStream(_rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_NonClosingTextIOWrapper(io.TextIOWrapper)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_NonClosingTextIOWrapper(io.TextIOWrapper, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_find_binary_reader(stream: t.IO[t.Any])"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_find_binary_reader(stream: t.IO[t.Any], _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_find_binary_writer(stream: t.IO[t.Any])"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_find_binary_writer(stream: t.IO[t.Any], _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_force_correct_text_reader(\n    text_reader: t.IO[t.Any],\n    encoding: t.Optional[str],\n    errors: t.Optional[str],\n    force_readable: bool = False,\n)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_force_correct_text_reader(text_reader: t.IO[t.Any],\n    encoding: t.Optional[str],\n    errors: t.Optional[str],\n    force_readable: bool = False,, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_force_correct_text_stream(\n    text_stream: t.IO[t.Any],\n    encoding: t.Optional[str],\n    errors: t.Optional[str],\n    is_binary: t.Callable[[t.IO[t.Any], bool], bool],\n    find_binary: t.Callable[[t.IO[t.Any]], t.Optional[t.BinaryIO]],\n    force_readable: bool = False,\n    force_writable: bool = False,\n)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_force_correct_text_stream(text_stream: t.IO[t.Any],\n    encoding: t.Optional[str],\n    errors: t.Optional[str],\n    is_binary: t.Callable[[t.IO[t.Any], bool], bool],\n    find_binary: t.Callable[[t.IO[t.Any]], t.Optional[t.BinaryIO]],\n    force_readable: bool = False,\n    force_writable: bool = False,, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_force_correct_text_writer(\n    text_writer: t.IO[t.Any],\n    encoding: t.Optional[str],\n    errors: t.Optional[str],\n    force_writable: bool = False,\n)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_force_correct_text_writer(text_writer: t.IO[t.Any],\n    encoding: t.Optional[str],\n    errors: t.Optional[str],\n    force_writable: bool = False,, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_get_argv_encoding()"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_get_argv_encoding(_rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_get_windows_console_stream(\n        f: t.TextIO, encoding: t.Optional[str], errors: t.Optional[str]\n    )"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_get_windows_console_stream(f: t.TextIO, encoding: t.Optional[str], errors: t.Optional[str], _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_is_binary_reader(stream: t.IO[t.Any], default: bool = False)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_is_binary_reader(stream: t.IO[t.Any], default: bool = False, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_is_binary_writer(stream: t.IO[t.Any], default: bool = False)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_is_binary_writer(stream: t.IO[t.Any], default: bool = False, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_is_compat_stream_attr(stream: t.TextIO, attr: str, value: t.Optional[str])"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_is_compat_stream_attr(stream: t.TextIO, attr: str, value: t.Optional[str], _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_is_compatible_text_stream(\n    stream: t.TextIO, encoding: t.Optional[str], errors: t.Optional[str]\n)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_is_compatible_text_stream(stream: t.TextIO, encoding: t.Optional[str], errors: t.Optional[str], _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_is_jupyter_kernel_output(stream: t.IO[t.Any])"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_is_jupyter_kernel_output(stream: t.IO[t.Any], _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_make_cached_stream_func(\n    src_func: t.Callable[[], t.Optional[t.TextIO]],\n    wrapper_func: t.Callable[[], t.TextIO],\n)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_make_cached_stream_func(src_func: t.Callable[[], t.Optional[t.TextIO]],\n    wrapper_func: t.Callable[[], t.TextIO],, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_make_text_stream(\n    stream: t.BinaryIO,\n    encoding: t.Optional[str],\n    errors: t.Optional[str],\n    force_readable: bool = False,\n    force_writable: bool = False,\n)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_make_text_stream(stream: t.BinaryIO,\n    encoding: t.Optional[str],\n    errors: t.Optional[str],\n    force_readable: bool = False,\n    force_writable: bool = False,, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_stream_is_misconfigured(stream: t.TextIO)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_stream_is_misconfigured(stream: t.TextIO, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "_wrap_io_open(\n    file: t.Union[str, \"os.PathLike[str]\", int],\n    mode: str,\n    encoding: t.Optional[str],\n    errors: t.Optional[str],\n)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "_wrap_io_open(file: t.Union[str, \"os.PathLike[str]\", int],\n    mode: str,\n    encoding: t.Optional[str],\n    errors: t.Optional[str],, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "auto_wrap_for_ansi(  # noqa: F811\n        stream: t.TextIO, color: t.Optional[bool] = None\n    )"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "auto_wrap_for_ansi(# noqa: F811\n        stream: t.TextIO, color: t.Optional[bool] = None, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "get_best_encoding(stream: t.IO[t.Any])"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "get_best_encoding(stream: t.IO[t.Any], _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "get_binary_stderr()"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "get_binary_stderr(_rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "get_binary_stdin()"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "get_binary_stdin(_rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "get_binary_stdout()"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "get_binary_stdout(_rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "get_text_stderr(\n    encoding: t.Optional[str] = None, errors: t.Optional[str] = None\n)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "get_text_stderr(encoding: t.Optional[str] = None, errors: t.Optional[str] = None, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__enter__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__exit__(self, exc_type: t.Optional[t.Type[BaseException]], *_: t.Any)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__getattr__(self, name: str)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(self, f: t.IO[t.Any], tmp_filename: str, real_filename: str)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__repr__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "close(self, delete: bool = False)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "name(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__getattr__(self, name: str)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(\n        self,\n        stream: t.BinaryIO,\n        force_readable: bool = False,\n        force_writable: bool = False,\n    )"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "read1(self, size: int)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "readable(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "seekable(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "writable(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__del__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(\n        self,\n        stream: t.BinaryIO,\n        encoding: t.Optional[str],\n        errors: t.Optional[str],\n        force_readable: bool = False,\n        force_writable: bool = False,\n        **extra: t.Any,\n    )"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "isatty(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "func()"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_safe_write(s)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(\n        self,\n        editor: t.Optional[str] = None,\n        env: t.Optional[t.Mapping[str, str]] = None,\n        require_save: bool = True,\n        extension: str = \".txt\",\n    )"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "edit(self, text: t.Optional[t.AnyStr])"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "edit_file(self, filename: str)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "get_editor(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__enter__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__exit__(\n        self,\n        exc_type: t.Optional[t.Type[BaseException]],\n        exc_value: t.Optional[BaseException],\n        tb: t.Optional[TracebackType],\n    )"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(\n        self,\n        iterable: t.Optional[t.Iterable[V]],\n        length: t.Optional[int] = None,\n        fill_char: str = \"#\",\n        empty_char: str = \" \",\n        bar_template: str = \"%(bar)s\",\n        info_sep: str = \"  \",\n        show_eta: bool = True,\n        show_percent: t.Optional[bool] = None,\n        show_pos: bool = False,\n        item_show_func: t.Optional[t.Callable[[t.Optional[V]], t.Optional[str]]] = None,\n        label: t.Optional[str] = None,\n        file: t.Optional[t.TextIO] = None,\n        color: t.Optional[bool] = None,\n        update_min_steps: int = 1,\n        width: int = 30,\n    )"
+          }
+        ],
+        "census": {
+          "method_collision_groups_excluded": 96,
+          "method_symbols_excluded": 380,
+          "method_total": 722,
+          "top_level_signature_collision_groups": 6,
+          "top_level_symbols_in_collisions": 13,
+          "top_level_total": 521
+        },
+        "corpus": "click 8.1.7",
+        "cartogate": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tp": 25
+        },
+        "grep_baseline": {
+          "f1": 0.5,
+          "fn": 0,
+          "fp": 50,
+          "precision": 0.3333,
+          "recall": 1.0,
+          "tp": 25
+        },
+        "sample": 25
+      },
+      "notes": "Labels are objective by construction (extra-param and method cases are not top-level duplicates). Census reports real signature collisions.",
+      "passed": true,
+      "reproduce": "python -m evaluation.realstudy.run_realstudy --sample 25",
+      "title": "Duplicate detection (check_duplicate vs name-grep, real symbols)"
+    },
+    "V4_fixture": {
+      "bucket": "B",
+      "claim": "Catches real duplicates (incl. annotation-only differences) without false-flagging same-named methods or different-signature functions.",
+      "id": "V4_fixture",
+      "metric": {
+        "cases": [
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "note": "exact existing top-level function",
+            "signature": "def authenticate(name):"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "note": "same callable with annotations/return type \u2014 a textual compare would miss it",
+            "signature": "def authenticate(name: str) -> bool:"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "note": "name exists (billing.charge) but the signature differs \u2014 not the same callable",
+            "signature": "def charge(amount, currency, region):"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "note": "`close` exists only as User.close (a method) \u2014 not a top-level duplicate",
+            "signature": "def close():"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": false,
+            "is_duplicate": false,
+            "note": "genuinely new symbol",
+            "signature": "def brand_new(x):"
+          }
+        ],
+        "cartogate": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 2
+        },
+        "grep_baseline": {
+          "f1": 0.6667,
+          "false_negative": 0,
+          "false_positive": 2,
+          "precision": 0.5,
+          "recall": 1.0,
+          "true_positive": 2
+        }
+      },
+      "notes": "Grep false-positives: charge (different params) and close (a method).",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_gates_duplicate.py",
+      "title": "Duplicate detection (check_duplicate vs name-grep) \u2014 illustrative fixture"
+    },
+    "V4_go_fixture": {
+      "bucket": "B",
+      "claim": "On Go, catches a real top-level duplicate by signature without false-flagging a same-named function with a different parameter list.",
+      "id": "V4_go_fixture",
+      "metric": {
+        "cases": [
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "note": "exact existing auth.Validate",
+            "signature": "func Validate(name string) bool"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "note": "name exists (auth + billing) but the 2-arg signature matches neither \u2014 not a duplicate",
+            "signature": "func Validate(x int, y int) bool"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "note": "exact existing billing.Charge",
+            "signature": "func Charge(amount int, currency string) bool"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": false,
+            "is_duplicate": false,
+            "note": "genuinely new symbol",
+            "signature": "func BrandNew(x int) bool"
+          }
+        ],
+        "cartogate": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 2
+        },
+        "grep_baseline": {
+          "f1": 0.8,
+          "false_negative": 0,
+          "false_positive": 1,
+          "precision": 0.6667,
+          "recall": 1.0,
+          "true_positive": 2
+        }
+      },
+      "notes": "Grep over-blocks `Validate(x,y)` \u2014 the name exists but no top-level callable has that signature.",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_go_fixture.py",
+      "title": "Duplicate detection (check_duplicate vs name-grep) \u2014 Go fixture"
+    },
+    "V4_jmespath": {
+      "bucket": "B",
+      "claim": "On objectively-labeled cases built from real symbols, the gate catches true duplicates without false-flagging different-signature or method-named functions; name-grep over-blocks both.",
+      "id": "V4_jmespath",
+      "metric": {
+        "cases": [
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "and_expression(left, right)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "and_expression(left, right, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "comparator(name, first, second)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "comparator(name, first, second, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "current_node()"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "current_node(_rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "expref(expression)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "expref(expression, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "field(name)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "field(name, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "filter_projection(left, right, comparator)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "filter_projection(left, right, comparator, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "flatten(node)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "flatten(node, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "function_expression(name, args)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "function_expression(name, args, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "identity()"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "identity(_rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "index(index)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "index(index, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "index_expression(children)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "index_expression(children, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "key_val_pair(key_name, node)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "key_val_pair(key_name, node, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "literal(literal_value)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "literal(literal_value, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "multi_select_dict(nodes)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "multi_select_dict(nodes, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "multi_select_list(nodes)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "multi_select_list(nodes, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "not_expression(expr)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "not_expression(expr, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "or_expression(left, right)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "or_expression(left, right, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "pipe(left, right)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "pipe(left, right, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "projection(left, right)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "projection(left, right, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "slice(start, end, step)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "slice(start, end, step, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "subexpression(children)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "subexpression(children, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "value_projection(left, right)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "value_projection(left, right, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "get_methods(cls)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "get_methods(cls, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "with_repr_method(cls)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "with_repr_method(cls, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": true,
+            "grep_blocked": true,
+            "is_duplicate": true,
+            "kind": "exact",
+            "signature": "with_str_method(cls)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "extra_param",
+            "signature": "with_str_method(cls, _rs_extra)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(self, expected, actual, name)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__str__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_pluralize(self, word, count)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__str__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "set_expression(self, expression)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(self, function_name, current_value, actual_type,\n                 expected_types)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__str__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(self, lexer_position, lexer_value, message, expression=None)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__str__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(self, lex_position, token_value, token_type,\n                 msg=_ERROR_MESSAGE)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__str__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__str__(self)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "__init__(cls, name, bases, attrs)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_populate_function_table(cls)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_convert_to_jmespath_type(self, pyobject)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_create_key_func(self, expref, allowed_types, function_name)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "keyfunc(x)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_func_abs(self, arg)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_func_avg(self, arg)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_func_ceil(self, arg)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_func_contains(self, subject, search)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_func_ends_with(self, search, suffix)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_func_floor(self, arg)"
+          },
+          {
+            "cartogate_blocked": false,
+            "grep_blocked": true,
+            "is_duplicate": false,
+            "kind": "method_as_toplevel",
+            "signature": "_func_join(self, separator, array)"
+          }
+        ],
+        "census": {
+          "method_collision_groups_excluded": 6,
+          "method_symbols_excluded": 22,
+          "method_total": 236,
+          "top_level_signature_collision_groups": 0,
+          "top_level_symbols_in_collisions": 0,
+          "top_level_total": 72
+        },
+        "corpus": "jmespath 1.0.1",
+        "corpus_kind": "library",
+        "cartogate": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tp": 25
+        },
+        "grep_baseline": {
+          "f1": 0.5,
+          "fn": 0,
+          "fp": 50,
+          "precision": 0.3333,
+          "recall": 1.0,
+          "tp": 25
+        },
+        "sample": 25
+      },
+      "notes": "Labels are objective by construction (extra-param and method cases are not top-level duplicates). Census reports real signature collisions.",
+      "passed": true,
+      "reproduce": "python -m evaluation.realstudy.run_realstudy --corpus jmespath --sample 25",
+      "title": "Duplicate detection (check_duplicate vs name-grep, real symbols)"
+    },
+    "V5_fixture": {
+      "bucket": "B",
+      "claim": "Flags breaking signature/visibility changes to an exported symbol; passes safe ones.",
+      "id": "V5_fixture",
+      "metric": {
+        "baseline": "none (no standard tool detects contract breaks automatically)",
+        "cases": [
+          {
+            "cartogate_blocked": true,
+            "is_breaking": true,
+            "label": "add-param",
+            "note": "added a required parameter \u2014 callers break"
+          },
+          {
+            "cartogate_blocked": true,
+            "is_breaking": true,
+            "label": "narrow-visibility",
+            "note": "exported symbol made internal \u2014 importers break"
+          },
+          {
+            "cartogate_blocked": false,
+            "is_breaking": false,
+            "label": "annotate-only",
+            "note": "same parameters, only annotations added \u2014 safe"
+          },
+          {
+            "cartogate_blocked": false,
+            "is_breaking": false,
+            "label": "widen-visibility",
+            "note": "exported widened to public \u2014 safe"
+          }
+        ],
+        "cartogate": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 2
+        },
+        "target": "proj.auth.authenticate"
+      },
+      "notes": "Baseline is manual code review; Cartogate makes the check deterministic.",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_gates_contract.py",
+      "title": "Contract-break detection (check_contract) \u2014 illustrative fixture"
+    },
+    "V6_fixture": {
+      "bucket": "B",
+      "claim": "Flags docs explicitly documenting a symbol with higher precision than grepping markdown.",
+      "id": "V6_fixture",
+      "metric": {
+        "cartogate": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 1
+        },
+        "cartogate_docs": [
+          "README.md"
+        ],
+        "grep_baseline": {
+          "f1": 0.5,
+          "false_negative": 0,
+          "false_positive": 2,
+          "precision": 0.3333,
+          "recall": 1.0,
+          "true_positive": 1
+        },
+        "grep_docs": [
+          "README.md",
+          "api.md",
+          "security.md"
+        ],
+        "target": "proj.auth.authenticate",
+        "truth_docs": [
+          "README.md"
+        ]
+      },
+      "notes": "Conservative matching (exact qname or unique bare name) is what wins precision; ambiguous bare names are skipped (a known recall limitation).",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_doc_drift.py",
+      "title": "Doc-drift detection (doc_drift vs md-grep) \u2014 illustrative fixture"
+    },
+    "V6_go_fixture": {
+      "bucket": "B",
+      "claim": "On Go, flags the doc that explicitly documents a symbol with higher precision than grepping markdown.",
+      "id": "V6_go_fixture",
+      "metric": {
+        "cartogate": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 1
+        },
+        "cartogate_docs": [
+          "README.md"
+        ],
+        "grep_baseline": {
+          "f1": 0.6667,
+          "false_negative": 0,
+          "false_positive": 1,
+          "precision": 0.5,
+          "recall": 1.0,
+          "true_positive": 1
+        },
+        "grep_docs": [
+          "README.md",
+          "guide.md"
+        ],
+        "target": "proj_go.auth.Authenticate",
+        "truth_docs": [
+          "README.md"
+        ]
+      },
+      "notes": "Grep false-positive: guide.md (a prose mention, not a code reference).",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_go_fixture.py",
+      "title": "Doc-drift detection (doc_drift vs md-grep) \u2014 Go fixture"
+    },
+    "V7": {
+      "bucket": "B",
+      "claim": "When suggest_tests names a test, coverage confirms that test really does exercise the symbol (high precision). Overall recall against full runtime coverage is bounded by how much of that coverage is statically reachable at all: Cartogate recovers \u2248all of the statically-reachable tests, and the rest is dynamic dispatch no sound static analyzer can follow.",
+      "id": "V7",
+      "metric": {
+        "corpus": "click 8.1.7",
+        "corpus_kind": "cli",
+        "depth": 1,
+        "cartogate": {
+          "f1": 0.0854,
+          "fn": 149,
+          "fp": 1,
+          "precision": 0.875,
+          "recall": 0.0449,
+          "tp": 7
+        },
+        "oracle": "coverage.py per-test contexts (runtime truth)",
+        "per_symbol": [
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 3,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 2,
+            "symbol": "click._compat._AtomicFile",
+            "truth_tests": 3
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 1,
+            "symbol": "click._compat._FixupStream",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 1,
+            "symbol": "click._compat._NonClosingTextIOWrapper",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 5,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 4,
+            "symbol": "click._compat._find_binary_reader",
+            "truth_tests": 5
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 6,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 5,
+            "symbol": "click._compat._find_binary_writer",
+            "truth_tests": 6
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 4,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 2,
+            "symbol": "click._compat._force_correct_text_reader",
+            "truth_tests": 4
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 8,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 6,
+            "symbol": "click._compat._is_binary_reader",
+            "truth_tests": 8
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 16,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 8,
+            "symbol": "click._compat._is_jupyter_kernel_output",
+            "truth_tests": 16
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 1,
+            "symbol": "click._compat._make_text_stream",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 13,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 6,
+            "symbol": "click._compat._wrap_io_open",
+            "truth_tests": 13
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 2,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 2,
+            "symbol": "click._compat.get_best_encoding",
+            "truth_tests": 2
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 4,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "click._compat.get_binary_stdin",
+            "truth_tests": 4
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 4,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "click._compat.get_binary_stdout",
+            "truth_tests": 4
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 4,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 2,
+            "symbol": "click._compat.get_text_stdin",
+            "truth_tests": 4
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 17,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 8,
+            "symbol": "click._compat.isatty",
+            "truth_tests": 17
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 17,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 7,
+            "symbol": "click._compat.open_stream",
+            "truth_tests": 17
+          },
+          {
+            "score": {
+              "f1": 0.1176,
+              "fn": 15,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0625,
+              "tp": 1
+            },
+            "selected_tests": 1,
+            "statically_reachable_truth": 8,
+            "symbol": "click._compat.should_strip_ansi",
+            "truth_tests": 16
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 1,
+            "symbol": "click._termui_impl.Editor",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 18,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 18,
+            "symbol": "click._termui_impl.ProgressBar",
+            "truth_tests": 18
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 1,
+            "symbol": "click._termui_impl._pipepager",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 1,
+            "symbol": "click._termui_impl.pager",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 6,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 5,
+            "symbol": "click.core._complete_visible_commands",
+            "truth_tests": 6
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "click.core.batch",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 0.6667,
+              "fn": 0,
+              "fp": 1,
+              "precision": 0.5,
+              "recall": 1.0,
+              "tp": 1
+            },
+            "selected_tests": 2,
+            "statically_reachable_truth": 1,
+            "symbol": "click.decorators.help_option",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 5
+            },
+            "selected_tests": 5,
+            "statically_reachable_truth": 5,
+            "symbol": "click.decorators.make_pass_decorator",
+            "truth_tests": 5
+          }
+        ],
+        "pytest_summary": "1 failed, 588 passed, 21 skipped, 1 xfailed, 1 warning in 3.10s",
+        "static_reachability": {
+          "depth_curve": {
+            "1": {
+              "f1": 0.0854,
+              "fn": 149,
+              "fp": 1,
+              "precision": 0.875,
+              "recall": 0.0449,
+              "tp": 7
+            },
+            "2": {
+              "f1": 0.1549,
+              "fn": 122,
+              "fp": 249,
+              "precision": 0.1201,
+              "recall": 0.2179,
+              "tp": 34
+            },
+            "3": {
+              "f1": 0.1654,
+              "fn": 91,
+              "fp": 565,
+              "precision": 0.1032,
+              "recall": 0.4167,
+              "tp": 65
+            },
+            "4": {
+              "f1": 0.1399,
+              "fn": 76,
+              "fp": 908,
+              "precision": 0.081,
+              "recall": 0.5128,
+              "tp": 80
+            }
+          },
+          "reachable_fraction": 0.609,
+          "recall_within_reachable": 0.0737,
+          "static_depth": 25
+        },
+        "suite_total_tests": 310,
+        "symbols_scored": 25
+      },
+      "notes": "Truth = tests whose coverage executed the symbol's lines (transitive). Overall recall is low where coverage is dominated by dynamic dispatch (getattr tables, runner.invoke): only ~61% of these symbols' runtime coverage is statically reachable, but Cartogate recovers ~7% of that reachable set.",
+      "passed": true,
+      "reproduce": "python -m evaluation.realstudy.run_realstudy --corpus click --sample 25",
+      "title": "Test selection (suggest_tests vs coverage oracle)"
+    },
+    "V7_fixture": {
+      "bucket": "B",
+      "claim": "Selects the tests exercising a change \u2014 run fewer tests, lose no relevant coverage.",
+      "id": "V7_fixture",
+      "metric": {
+        "cartogate": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 1
+        },
+        "selected_count": 1,
+        "selected_tests": [
+          "proj.tests.test_auth.test_authenticate"
+        ],
+        "suite_reduction_ratio": 0.6667,
+        "suite_size": 3,
+        "target": "proj.auth.authenticate",
+        "truth_tests": [
+          "proj.tests.test_auth.test_authenticate"
+        ]
+      },
+      "notes": "On this fixture, 1 of 3 tests is relevant \u2014 a 67% reduction with full relevant recall.",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_test_selection.py",
+      "title": "Test selection (suggest_tests) \u2014 illustrative fixture (direct unit tests)"
+    },
+    "V7_go_fixture": {
+      "bucket": "B",
+      "claim": "On Go, selects exactly the test that exercises a changed symbol.",
+      "id": "V7_go_fixture",
+      "metric": {
+        "cartogate": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 1
+        },
+        "selected_tests": [
+          "proj_go.auth.TestValidate"
+        ],
+        "target": "proj_go.auth.Validate",
+        "truth_tests": [
+          "proj_go.auth.TestValidate"
+        ]
+      },
+      "notes": "TestAuthenticate exercises Authenticate, not Validate, so it is correctly excluded.",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_go_fixture.py",
+      "title": "Test selection (suggest_tests) \u2014 Go fixture"
+    },
+    "V7_jmespath": {
+      "bucket": "B",
+      "claim": "When suggest_tests names a test, coverage confirms that test really does exercise the symbol (high precision). Overall recall against full runtime coverage is bounded by how much of that coverage is statically reachable at all: Cartogate recovers \u2248all of the statically-reachable tests, and the rest is dynamic dispatch no sound static analyzer can follow.",
+      "id": "V7_jmespath",
+      "metric": {
+        "corpus": "jmespath 1.0.1",
+        "corpus_kind": "library",
+        "depth": 1,
+        "cartogate": {
+          "f1": 0.1045,
+          "fn": 120,
+          "fp": 0,
+          "precision": 1.0,
+          "recall": 0.0551,
+          "tp": 7
+        },
+        "oracle": "coverage.py per-test contexts (runtime truth)",
+        "per_symbol": [
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 2,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.and_expression",
+            "truth_tests": 2
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 3,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.comparator",
+            "truth_tests": 3
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 7,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.current_node",
+            "truth_tests": 7
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 2,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.expref",
+            "truth_tests": 2
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 2,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.filter_projection",
+            "truth_tests": 2
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 4,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.flatten",
+            "truth_tests": 4
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 9,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.function_expression",
+            "truth_tests": 9
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 11,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.identity",
+            "truth_tests": 11
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 8,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.index",
+            "truth_tests": 8
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 8,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.index_expression",
+            "truth_tests": 8
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 9,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.key_val_pair",
+            "truth_tests": 9
+          },
+          {
+            "score": {
+              "f1": 0.3333,
+              "fn": 4,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.2,
+              "tp": 1
+            },
+            "selected_tests": 1,
+            "statically_reachable_truth": 1,
+            "symbol": "jmespath.ast.literal",
+            "truth_tests": 5
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 7,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.multi_select_dict",
+            "truth_tests": 7
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.multi_select_list",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.not_expression",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 0.4,
+              "fn": 3,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.25,
+              "tp": 1
+            },
+            "selected_tests": 1,
+            "statically_reachable_truth": 1,
+            "symbol": "jmespath.ast.or_expression",
+            "truth_tests": 4
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 2,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.pipe",
+            "truth_tests": 2
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 11,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.projection",
+            "truth_tests": 11
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 2,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.slice",
+            "truth_tests": 2
+          },
+          {
+            "score": {
+              "f1": 0.25,
+              "fn": 12,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.1429,
+              "tp": 2
+            },
+            "selected_tests": 2,
+            "statically_reachable_truth": 2,
+            "symbol": "jmespath.ast.subexpression",
+            "truth_tests": 14
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 6,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.ast.value_projection",
+            "truth_tests": 6
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.compat.get_methods",
+            "truth_tests": 1
+          },
+          {
+            "score": {
+              "f1": 1.0,
+              "fn": 0,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "tp": 2
+            },
+            "selected_tests": 2,
+            "statically_reachable_truth": 2,
+            "symbol": "jmespath.compile",
+            "truth_tests": 2
+          },
+          {
+            "score": {
+              "f1": 0.0,
+              "fn": 4,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0,
+              "tp": 0
+            },
+            "selected_tests": 0,
+            "statically_reachable_truth": 0,
+            "symbol": "jmespath.exceptions.ArityError",
+            "truth_tests": 4
+          },
+          {
+            "score": {
+              "f1": 0.6667,
+              "fn": 1,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.5,
+              "tp": 1
+            },
+            "selected_tests": 1,
+            "statically_reachable_truth": 2,
+            "symbol": "jmespath.exceptions.EmptyExpressionError",
+            "truth_tests": 2
+          }
+        ],
+        "pytest_summary": "1 failed, 990 passed, 1 skipped, 16 warnings in 12.40s",
+        "static_reachability": {
+          "depth_curve": {
+            "1": {
+              "f1": 0.1045,
+              "fn": 120,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0551,
+              "tp": 7
+            },
+            "2": {
+              "f1": 0.1045,
+              "fn": 120,
+              "fp": 0,
+              "precision": 1.0,
+              "recall": 0.0551,
+              "tp": 7
+            },
+            "3": {
+              "f1": 0.0921,
+              "fn": 120,
+              "fp": 18,
+              "precision": 0.28,
+              "recall": 0.0551,
+              "tp": 7
+            },
+            "4": {
+              "f1": 0.0921,
+              "fn": 120,
+              "fp": 18,
+              "precision": 0.28,
+              "recall": 0.0551,
+              "tp": 7
+            }
+          },
+          "reachable_fraction": 0.063,
+          "recall_within_reachable": 0.875,
+          "static_depth": 25
+        },
+        "suite_total_tests": 73,
+        "symbols_scored": 25
+      },
+      "notes": "Truth = tests whose coverage executed the symbol's lines (transitive). Overall recall is low where coverage is dominated by dynamic dispatch (getattr tables, runner.invoke): only ~6% of these symbols' runtime coverage is statically reachable, but Cartogate recovers ~88% of that reachable set.",
+      "passed": true,
+      "reproduce": "python -m evaluation.realstudy.run_realstudy --corpus jmespath --sample 25",
+      "title": "Test selection (suggest_tests vs coverage oracle)"
+    },
+    "V8": {
+      "bucket": "C",
+      "claim": "Same input yields byte-identical tool output across runs and across processes (different PYTHONHASHSEED).",
+      "id": "V8",
+      "metric": {
+        "cross_process_identical": true,
+        "hash_seeds_compared": [
+          "0",
+          "12345"
+        ],
+        "payload_bytes": 2065,
+        "tools_checked": [
+          "find_references",
+          "blast_radius",
+          "check_duplicate",
+          "doc_drift",
+          "suggest_tests"
+        ]
+      },
+      "notes": "No model, blake2b ids (unseeded), explicit output sorting \u2192 reproducible.",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_determinism.py",
+      "title": "Determinism (byte-identical across processes)"
+    },
+    "V9": {
+      "bucket": "C",
+      "claim": "A BLOCK always rests on EXTRACTED, top-level evidence: INFERRED facts never gate, and method-name collisions across classes are never false-blocked.",
+      "id": "V9",
+      "metric": {
+        "inferred_never_blocks": true,
+        "method_collision_groups_excluded": 61,
+        "method_symbols_excluded": 199,
+        "method_symbols_total": 398,
+        "real_top_level_collision_blocks": true,
+        "self_source": "src/cartogate"
+      },
+      "notes": "On Cartogate's own source, top-level scoping excludes method-name collisions that a naive signature index would false-block.",
+      "passed": true,
+      "reproduce": "pytest -m value tests/value/test_soundness.py",
+      "title": "Soundness (R7 + top-level scoping)"
+    }
+  },
+  "schema_version": 1
+}

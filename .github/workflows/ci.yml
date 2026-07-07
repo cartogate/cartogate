@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# Cancel any in-flight run for the same branch/PR when a newer commit arrives.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    name: Quality Gate (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # Report all matrix entries even if one fails — cross-platform visibility matters.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+        # Cost trim: Windows runners bill at 2x minutes, so run Windows ONCE (on 3.11, our dev
+        # parity) instead of twice. Ubuntu still covers both Python versions; Windows still runs on
+        # every PR (the code is platform-abstracted, so OS-specific bugs are rare and one job catches
+        # them). Net jobs: ubuntu 3.11, ubuntu 3.12, windows 3.11 — halves the Windows spend.
+        exclude:
+          - os: windows-latest
+            python-version: "3.12"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs derives the version from tags + history
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          # Cache pip's download cache keyed to pyproject.toml so a dep change
+          # invalidates the cache automatically.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Some runner base images ship an old setuptools (e.g. 65.5.0 on windows) that
+      # pip-audit flags for CVEs unrelated to this project. Upgrade the build tooling
+      # first so the security scan reflects our actual dependency tree.
+      - name: Upgrade build tooling
+        run: python -m pip install --upgrade pip setuptools
+
+      # Editable install. Only `dev` (test/lint toolchain) is needed — the parsers, jedi, and the mcp
+      # SDK are all base deps now; `extract`/`mcp` survive as empty back-compat aliases.
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # --- Lint ---------------------------------------------------------------
+      - name: Lint (ruff)
+        run: ruff check .
+
+      # --- Type check ---------------------------------------------------------
+      - name: Type check (mypy)
+        run: mypy src
+
+      # --- Tests --------------------------------------------------------------
+      # pyproject addopts already applies -m 'not benchmark', so plain pytest runs
+      # the 98-test suite and skips the timing-sensitive SLO benchmarks.
+      # Do NOT add -m benchmark here — benchmarks are host-dependent and not
+      # suitable for a shared CI runner.
+      - name: Tests (pytest)
+        run: pytest
+
+      # --- Security scan ------------------------------------------------------
+      # Blocking: with build tooling upgraded above, the audit reflects our actual
+      # dependency tree. A CVE here fails the gate — bump the offending dependency.
+      - name: Security scan (pip-audit)
+        run: pip-audit
+
+  value-study:
+    name: Value study (deterministic layer)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs derives the version from tags + history
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install -e ".[dev]"
+
+      # Layer 1 of the value study (V2–V10) is deterministic and reproducible. It is
+      # non-blocking: the latency rows (V2/V10) have generous bounds but can be perturbed
+      # by a noisy shared runner, so a hiccup here must not fail the gate. The live agent
+      # A/B (V1) is NOT run in CI — it needs an API key and is opt-in (see evaluation/).
+      - name: Run value study (non-blocking)
+        continue-on-error: true
+        run: pytest -m value -v
+
+  package:
+    name: Package (build + distribution check)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs derives the version from tags + history
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Fresh build tooling so the distribution metadata (Metadata-Version 2.4 with the
+      # License-File field) is validated against a current `packaging`/`twine`.
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build twine
+
+      # Build both distributions from a clean tree.
+      - name: Build sdist + wheel
+        run: python -m build
+
+      # Blocking: the distribution metadata must be valid (README renders as the long
+      # description; all fields well-formed) or the package is not publishable.
+      - name: Check distribution metadata (twine)
+        run: twine check dist/*
+
+      # Clean-room install of the *built wheel* (not the source tree) into a fresh venv, with NO
+      # extras — this proves the central claim: a bare install is fully functional because the
+      # parser + grammars + resolver AND the MCP SDK ship as base deps. We import them (catches a
+      # broken native wheel / a missing-mcp regression), check version single-sourcing + console
+      # scripts, and run the binary.
+      - name: Smoke-test the built wheel (bare install)
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --upgrade pip
+          /tmp/smoke/bin/pip install "$(ls dist/*.whl)"
+          /tmp/smoke/bin/python - <<'PY'
+          import importlib.metadata as m
+          import cartogate
+          import tree_sitter_python  # base dep -> must import on a bare install
+          import jedi  # base dep -> must import on a bare install
+          import mcp  # base dep -> cartogate-mcp works on a bare install (no [mcp] extra needed)
+          from importlib.metadata import entry_points
+          assert cartogate.__version__ == m.version("cartogate"), "version drift"
+          names = {e.name for e in entry_points(group="console_scripts")}
+          assert {"cartogate", "cartogate-mcp"} <= names, names
+          print("smoke OK", cartogate.__version__, "tree-sitter+jedi+mcp import OK")
+          PY
+          /tmp/smoke/bin/cartogate --version
+          /tmp/smoke/bin/cartogate --help

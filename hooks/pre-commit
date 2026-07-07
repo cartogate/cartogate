@@ -1,0 +1,5 @@
+#!/bin/sh
+# Cartogate git pre-commit hook shim. Copy or symlink this file into .git/hooks/pre-commit.
+# It runs the duplicate-signature gate over the repository root.
+repo_root="$(git rev-parse --show-toplevel)"
+exec python "$repo_root/hooks/pre_commit.py" "$repo_root"

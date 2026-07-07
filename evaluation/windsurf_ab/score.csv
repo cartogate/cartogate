@@ -1,0 +1,11 @@
+task,category,arm,trial,steps,tokens,gate_fired,duplicate_introduced,task_done,notes
+auth,reuse,A,1,,,,,,
+auth,reuse,B,1,,,n/a,,,
+validate,reuse,A,1,,,,,,
+validate,reuse,B,1,,,n/a,,,
+user,reuse,A,1,,,,,,
+user,reuse,B,1,,,n/a,,,
+tax,novel,A,1,,,,,,
+tax,novel,B,1,,,n/a,,,
+ledger,novel,A,1,,,,,,
+ledger,novel,B,1,,,n/a,,,

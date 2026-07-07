@@ -1,0 +1,9 @@
+# Normalize all text to LF in the repo (Windows dev host emits CRLF).
+# Stable line endings keep content_hash deterministic across platforms (risk R3/R4).
+* text=auto eol=lf
+
+# Binary / generated artifacts — never normalize.
+*.png binary
+*.jpg binary
+*.svg binary
+*.graphml binary

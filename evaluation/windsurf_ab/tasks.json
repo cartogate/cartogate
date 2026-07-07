@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "codebase": "taskpack/usersvc",
+  "tasks": [
+    {
+      "id": "auth",
+      "category": "reuse",
+      "prompt": "Add a helper to usersvc that authenticates a user by name and returns whether they're valid.",
+      "target_symbol": "authenticate",
+      "target_signature": "authenticate(name)",
+      "expected": "reuse usersvc.auth.authenticate; do NOT write a second authenticate"
+    },
+    {
+      "id": "validate",
+      "category": "reuse",
+      "prompt": "I need a function in usersvc to validate a user record before saving it — it must require a non-empty name.",
+      "target_symbol": "validate",
+      "target_signature": "validate(record)",
+      "expected": "reuse usersvc.auth.validate; do NOT write a second validate"
+    },
+    {
+      "id": "user",
+      "category": "reuse",
+      "prompt": "Add a User class to usersvc that stores a user's name.",
+      "target_symbol": "User",
+      "target_signature": "User",
+      "expected": "reuse usersvc.models.User; do NOT write a second User class"
+    },
+    {
+      "id": "tax",
+      "category": "novel",
+      "prompt": "Add a function compute_tax(amount, rate, region) to usersvc that returns the tax owed.",
+      "target_symbol": null,
+      "target_signature": "compute_tax(amount, rate, region)",
+      "expected": "genuinely novel — the gate must NOT block this write"
+    },
+    {
+      "id": "ledger",
+      "category": "novel",
+      "prompt": "Add a Ledger class to usersvc that records transactions in a list.",
+      "target_symbol": null,
+      "target_signature": "Ledger",
+      "expected": "genuinely novel — the gate must NOT block this write"
+    }
+  ]
+}

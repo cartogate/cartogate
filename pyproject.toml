@@ -1,0 +1,157 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cartogate"
+# Version derives from git at build time (hatch-vcs, see [tool.hatch.version]): every commit
+# builds a UNIQUE version (e.g. 0.1.1.dev87+g7c3e8f4), so an installed build always identifies
+# its exact commit — no manual bump per PR; `cartogate --version` / mcp.log / @cartogate confirm
+# what's running.
+dynamic = ["version"]
+description = "Local-first, CPG-shaped typed code knowledge graph + deterministic gate engine for coding agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Alexander Moulton" }]
+dependencies = [
+    "anyio>=4",  # daemon TCP server / async runtime (also transitive via mcp)
+    "networkx>=3.2",
+    "psutil>=5.9",
+    "pydantic>=2",
+    # Extraction is core, not optional: without these the CLI can't parse or resolve any code, so
+    # they ship by default — a bare `pip install cartogate` / `pipx install cartogate` is fully
+    # functional out of the box.
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-typescript>=0.23",  # TypeScript/JS grammar (F-08)
+    "tree-sitter-java>=0.23",  # Java grammar (F-08)
+    "tree-sitter-go>=0.23",  # Go grammar (F-08)
+    "tree-sitter-rust>=0.23",  # Rust grammar (F-08)
+    "tree-sitter-c-sharp>=0.23",  # C# grammar (F-08)
+    "tree-sitter-c>=0.23",  # C grammar (F-08)
+    "tree-sitter-cpp>=0.23",  # C++ grammar (F-08)
+    "tree-sitter-kotlin>=1.1",  # Kotlin grammar (F-08)
+    "tree-sitter-swift>=0.7",  # Swift grammar (F-08)
+    "jedi>=0.19",  # Python name resolution — in-process, deterministic, air-gapped
+    # The MCP server is a primary surface (Windsurf / Claude Code / Cursor / …), so its SDK ships by
+    # default too — a bare install gives a working `cartogate-mcp`, no extra to remember/forget.
+    # Pinned below 2.0: the low-level Server API is used directly; a major bump may change the
+    # list_tools/call_tool handler contract (risk R6). Verified with 1.28.
+    "mcp>=1.2,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/cartogate/cartogate"
+Repository = "https://github.com/cartogate/cartogate"
+Issues = "https://github.com/cartogate/cartogate/issues"
+
+[project.optional-dependencies]
+# Back-compat aliases: extraction AND the MCP SDK now ship in the base install (above), so a bare
+# `pip install cartogate` / `pipx install cartogate` is fully functional — no extra to remember.
+# Kept (empty) so existing `pip install cartogate[extract]` / `[mcp]` invocations don't error.
+extract = []
+mcp = []
+# The live agent A/B study (Layer 2 of the value harness) talks to the Claude API. Kept
+# out of the default/dev install: the deterministic value suite (Layer 1) needs nothing here.
+evaluation = [
+    "anthropic>=0.40",
+]
+dev = [
+    "pytest>=8",
+    "pytest-benchmark>=4",
+    "pytest-cov>=5",
+    "hypothesis>=6",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "freezegun>=1.5",
+    "pip-audit>=2.7",  # dependency CVE scanning (wire into CI, F-29)
+    "build>=1.2",  # PEP 517 sdist/wheel build (packaging-readiness CI job)
+    "twine>=5",  # distribution-metadata validation (`twine check`)
+]
+
+[project.scripts]
+# cartogate-mcp goes through a thin entry that fails with an actionable message when the optional
+# [mcp] SDK isn't installed, instead of a raw ModuleNotFoundError.
+cartogate-mcp = "cartogate.mcp._entry:main"
+cartogate = "cartogate.cli:main"
+# Convenience alias - 5 keystrokes. `cartogate` stays canonical: npm's legacy CartoCSS
+# compiler also ships a `carto` binary, so on machines where that wins the PATH race the
+# canonical command still works.
+carto = "cartogate.cli:main"
+# The write-time gate (PreToolUse / pre_write_code): one command, auto-detecting payload
+# shape, wired by `cartogate init --agent claude|windsurf`.
+cartogate-write-gate = "cartogate.writegate:main"
+# The commit gate as a console script: PATH-resolved from the pipx venv, so the git hook
+# never depends on which `python` is first on PATH (field bug, 2026-07-04).
+cartogate-precommit = "cartogate.precommit:main"
+
+# Git-derived version (declared dynamic above): tags (v0.1.0) set the release base and every
+# commit past a tag gets a dev suffix + the short hash. The fallback covers building from a
+# tarball with no git metadata.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0+unknown"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cartogate"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+# Fixtures are sample code to be *analyzed* by the extractor, not linted; the value-study
+# corpus snapshot is read-only third-party code (gitignored), never ours to lint.
+extend-exclude = ["tests/fixtures", "tests/value/fixtures", "evaluation/corpus/_snapshot"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, pep8-naming, pyupgrade, bugbear, comprehensions
+select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["N802", "N803", "N806"]  # test helpers may use non-snake naming freely
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+packages = ["cartogate"]
+warn_unused_configs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["psutil.*", "networkx.*", "jedi.*", "tree_sitter_python.*"]
+ignore_missing_imports = true
+
+# The MCP low-level SDK exposes untyped decorators (list_tools/call_tool); relax only the
+# decorator/call strictness for the thin server adapter that wires them (risk R6 is covered
+# by the list-tools smoke test instead).
+[[tool.mypy.overrides]]
+module = ["cartogate.mcp.server"]
+disallow_untyped_decorators = false
+disallow_untyped_calls = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# Project root on sys.path so 'from tests.conftest import ...' resolves under both
+# 'pytest' and 'python -m pytest' invocations.
+pythonpath = ["."]
+# Benchmarks and the value study are deselected from the default run; run them with
+# -m benchmark / -m value respectively.
+# The value-study fixtures contain test_*.py files that are *sample code to analyze*, not
+# tests to run — keep pytest from collecting them.
+addopts = "-ra -m 'not benchmark and not value' --ignore=tests/value/fixtures"
+markers = [
+    "benchmark: worst-case-scale SLO benchmarks (Section 5); deselect with -m 'not benchmark'",
+    "integration: cross-component integration tests",
+    "value: developer-value study (docs/VALUE_STUDY.md); deselect with -m 'not value'",
+]
+
+[tool.coverage.run]
+source = ["src/cartogate"]
+branch = true

@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+coverage.xml
+
+# Instrumentation span logs (runtime artifacts)
+*.spans.jsonl
+
+# Daemon state (discovery file, span logs)
+.cartogate/
+
+# Value-study external corpus snapshot (fetched by tag, not vendored — see evaluation/corpus)
+evaluation/corpus/_snapshot/
+
+# Agent-pipeline state — NEVER tracked (a partial ignore let a report leak to the public
+# repo once; wholesale now)
+.dev/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
