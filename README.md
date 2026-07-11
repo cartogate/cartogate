@@ -112,6 +112,24 @@ Every judgment has one shape: what happened → extracted evidence with file:lin
 sanctioned action. Passing runs stamp the staged tree, so `cartogate stats` / `doctor` report
 which recent commits entered without the gate.
 
+## See your codebase
+
+`cartogate viz` renders the whole graph as **one self-contained HTML file** — no server, no
+network, opens with a double-click, deterministic to the byte. Seven views over the same
+extracted facts, from a role-group map down to per-symbol constellations.
+
+![Structure map — drill from role groups into subpackages and file-pair ribbons](docs/media/journey.gif)
+
+Hover any dot to trace what it calls and what calls it; click to pin a card with directed
+connections (`used by` / `uses`), the exact `file:line`, an open-in-editor link, and a
+shareable URL for the exact view you're looking at.
+
+![Dependency layers — hover a hub to fan out everything that depends on it](docs/media/trace.gif)
+
+And because a code map should also be a pleasure to look at:
+
+![The globe — your codebase on a sphere, relationships flying as arcs](docs/media/globe.gif)
+
 ## Results
 
 Precision and cost measured on real third-party repositories with independent oracles (pyright,

@@ -36,7 +36,9 @@ def test_viz_cli_writes_all_formats(tmp_path: Path) -> None:
     assert any(q.endswith(".use") for q in qnames)
 
     html = (out / "graph.html").read_text(encoding="utf-8")
-    assert "<svg" in html and "http://" not in html  # self-contained, offline
+    # self-contained, offline (the SVG namespace URI is an XML identifier, never fetched)
+    assert "<svg" in html
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
 
 
 def test_viz_cli_single_format(tmp_path: Path) -> None:

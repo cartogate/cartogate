@@ -29,9 +29,11 @@ from networkx.algorithms.community import louvain_communities
 from cartogate.schema.edges import Edge
 from cartogate.schema.enums import EdgeType, NodeKind
 from cartogate.schema.nodes import Node
+from cartogate.viz.families import FAMILIES, classify
 
-#: Selector order; the first entry is the default view.
-VIEWS = ("relatedness", "dependency", "package", "orbits", "galaxy", "globe")
+#: Selector order; the first entry is the default view. "families" lands first: the whole
+#: codebase generalised into role groups — the readable (and cheap-to-render) entry point.
+VIEWS = ("families", "relatedness", "dependency", "package", "orbits", "galaxy", "globe")
 
 _PAD = 40.0
 _R_MAX = 10.5  # >= renderer's max node radius (5.5 + 0.4*12 = 10.3)
@@ -40,7 +42,7 @@ _R_MAX = 10.5  # >= renderer's max node radius (5.5 + 0.4*12 = 10.3)
 _NODE_SPACING = 2 * _R_MAX + 3  # min centre-to-centre between sibling nodes on a ring
 _BASE_INNER = 2 * _R_MAX + 4  # inner ring clears the centre module
 _BASE_OUTER = _BASE_INNER + _NODE_SPACING  # outer ring clears the inner ring
-_CLUSTER_GAP = 34.0  # gap between adjacent cluster footprints
+_CLUSTER_GAP = 22.0  # gap between adjacent cluster footprints (denser: edges read better)
 #: Edge types that count as a file-level dependency for the cluster layout. Deliberately distinct
 #: from engine ``REFERENCE_EDGE_TYPES`` — this is file-topology, not symbol references, and it omits
 #: ``IMPLEMENTS`` (no extra layout value over ``INHERITS``); keep them independent on purpose.
@@ -48,16 +50,26 @@ _DEP_EDGES = frozenset({EdgeType.CALLS, EdgeType.IMPORTS, EdgeType.REFERENCES, E
 
 #: Categorical palette (hex literals, never user data) for subpackages and communities.
 _PALETTE = (
-    # Validated dark-surface categorical (dataviz reference instance; fixed order, never
-    # re-cycled per entity — communities beyond 8 repeat WITH a legend disclosure).
-    "#3987e5",
-    "#199e70",
-    "#c98500",
-    "#008300",
-    "#9085e9",
-    "#e66767",
-    "#d55181",
-    "#d95926",
+    # Validated dark-surface categorical, 16 hues (was 8 — the blind critique flagged
+    # heavy "colours repeat"; doubling the palette pushes repetition past most real
+    # community/subpackage counts). Fixed order, never re-cycled per entity; anything
+    # beyond 16 still repeats WITH the legend's disclosure line.
+    "#3987e5",  # blue
+    "#199e70",  # teal-green
+    "#c98500",  # amber
+    "#9085e9",  # periwinkle
+    "#e66767",  # coral
+    "#d55181",  # magenta-pink
+    "#4bb3c4",  # cyan
+    "#7cb342",  # lime-olive
+    "#5c6bc0",  # indigo
+    "#ec9a3c",  # orange
+    "#26a69a",  # sea-teal
+    "#ab7df6",  # violet
+    "#d98880",  # dusty-rose
+    "#66bb6a",  # green
+    "#c2a24a",  # gold-ochre
+    "#4fa3e0",  # sky
 )
 #: Diverging gradient (blue → pale → red) for dependency layers.
 _GRAD_STOPS = (
@@ -82,6 +94,29 @@ class LayoutResult:
     #: 3D sphere centers per unit (globe view) + the sphere radius, for JS rotation.
     globe_centers: dict[str, tuple[float, float, float]] = field(default_factory=dict)
     globe_radius: float = 0.0
+    #: Family aggregation (families view): unit -> family, families present (FAMILIES order),
+    #: their ring centres, per-family file counts, and the directed typed cross-family edge
+    #: matrix ((src_fam, dst_fam, edge_type, count), ...) sorted for determinism.
+    family_of: dict[str, str] = field(default_factory=dict)
+    fam_nodes: tuple[str, ...] = ()
+    fam_centers: dict[str, tuple[float, float]] = field(default_factory=dict)
+    fam_counts: dict[str, int] = field(default_factory=dict)
+    fam_matrix: tuple[tuple[str, str, str, int], ...] = ()
+    #: Per boxy view: (group index per unit aligned with sorted units, group names).
+    #: The territory renderer groups by THESE, not by fill — the palette repeats, and
+    #: colour-keyed grouping merged distinct groups into one giant box (user report).
+    enc_groups: dict[str, tuple[tuple[int, ...], tuple[str, ...]]] = field(
+        default_factory=dict
+    )
+
+
+def _layer_label(index: int, n_layers: int) -> str:
+    """One wording for a dependency layer — the legend and the territory boxes share it."""
+    if index == 0:
+        return "layer 0 (entry points)"
+    if index == n_layers - 1:
+        return f"layer {index} (foundations)"
+    return f"layer {index}"
 
 
 def _community_label(index: int, comm_of: dict[str, int]) -> str:
@@ -90,6 +125,23 @@ def _community_label(index: int, comm_of: dict[str, int]) -> str:
     members = [u for u, c in comm_of.items() if c == index]
     dominant = Counter(_subpackage(u) for u in members).most_common(1)[0][0]
     return f"{dominant} · {len(members)} file" + ("s" if len(members) != 1 else "")
+
+
+def _community_labels(n_comms: int, comm_of: dict[str, int]) -> tuple[str, ...]:
+    """Unique community names (blind critique: two legend rows read identically because
+    two communities shared a dominant subpackage). Collisions get a #n disambiguator."""
+    base = [_community_label(i, comm_of) for i in range(n_comms)]
+    seen: dict[str, int] = Counter(base)
+    dup = {name for name, c in seen.items() if c > 1}
+    running: dict[str, int] = {}
+    out: list[str] = []
+    for name in base:
+        if name in dup:
+            running[name] = running.get(name, 0) + 1
+            out.append(f"{name} (#{running[name]})")
+        else:
+            out.append(name)
+    return tuple(out)
 
 
 def _subpackage(unit: str) -> str:
@@ -128,6 +180,7 @@ def build_file_graph(nodes: Iterable[Node], edges: Iterable[Edge]) -> nx.DiGraph
 def compute_layout(nodes: Iterable[Node], edges: Iterable[Edge]) -> LayoutResult:
     """Compute node positions + fills + legends for all views, with adaptive non-overlap spacing."""
     node_list = list(nodes)
+    edge_list = list(edges)  # consumed twice: file graph + family matrix
     if not node_list:
         return LayoutResult(
             positions={v: {} for v in VIEWS},
@@ -141,26 +194,84 @@ def compute_layout(nodes: Iterable[Node], edges: Iterable[Edge]) -> LayoutResult
     for node in node_list:
         by_unit.setdefault(node.unit, []).append(node)
     units = sorted(by_unit)
-    file_graph = build_file_graph(node_list, edges)
+    file_graph = build_file_graph(node_list, edge_list)
 
     radii = {u: _unit_radii(by_unit[u]) for u in units}
-    cell = 2 * max(r[1] + _R_MAX for r in radii.values()) + _CLUSTER_GAP
+    # Cell from the 60th-percentile cluster, not the largest (user report: uniform
+    # max-sized cells left oceans of empty space around small files). The floor still
+    # gives the largest cluster ~78% clearance — a rare near-touch beats global sprawl.
+    outers = sorted(r[1] for r in radii.values())
+    q60 = outers[int(0.6 * (len(outers) - 1))]
+    cell = max(
+        2 * (q60 + _R_MAX) + _CLUSTER_GAP,
+        1.55 * (outers[-1] + _R_MAX) + _CLUSTER_GAP / 2,
+    )
 
     comm_order, comm_of = _community_order(units, file_graph)
     layer_of, cycle_units = _layer_of(units, file_graph)
 
-    grid_c, grid_dim = _flow_centers(units, cell)
-    comm_c, comm_dim = _flow_centers(comm_order, cell)
+    grid_c, grid_dim = _block_centers(units, {u: _subpackage(u) for u in units}, cell)
+    comm_c, comm_dim = _block_centers(
+        comm_order, {u: str(comm_of[u]) for u in comm_order}, cell
+    )
     layer_c, layer_dim = _layer_centers(layer_of, cell)
     orbit_c, orbit_dim = _orbit_centers(layer_of, cell)
     galaxy_c, galaxy_dim = _galaxy_centers(comm_order, cell)
-    globe3, globe_r, globe_dim = _globe_centers(comm_order, cell)
+    globe_weight = {u: float(file_graph.degree(u, weight="weight")) for u in comm_order}
+    globe3, globe_r, globe_dim = _globe_centers(comm_order, cell, globe_weight)
     canvas = 2 * _PAD + max(grid_dim, comm_dim, layer_dim, orbit_dim, galaxy_dim, globe_dim)
     half = canvas / 2
     globe_c = {u: (half + x, half + y) for u, (x, y, _z) in globe3.items()}  # yaw-0 projection
 
+    family_of = classify(units)
+    fam_nodes = tuple(f for f in FAMILIES if f in set(family_of.values()))
+    fam_centers = _family_centers(fam_nodes, canvas)
+    fam_counts = dict(Counter(family_of[u] for u in units))
+    fam_matrix = _family_matrix(node_list, edge_list, family_of)
+    fam_c = {u: fam_centers[family_of[u]] for u in units}
+
+    # shared group vocabulary: ONE computation feeds enc_groups, fills, and legends
+    # (review MED: duplicating these is the two-sources-of-truth shape that caused the
+    # colour-identity bug in the first place)
+    subpkgs = sorted({_subpackage(u) for u in units})
+    n_layers = max(layer_of.values()) + 1
+    n_comms = max(comm_of.values()) + 1
+
+    # true group identity per unit for the territory renderer (aligned with `units`);
+    # dependency names reuse the legend's exact wording (review LOW: they diverged)
+    sub_idx = {g: i for i, g in enumerate(subpkgs)}
+    enc_groups = {
+        "package": (
+            tuple(sub_idx[_subpackage(u)] for u in units),
+            tuple(subpkgs),
+        ),
+        "relatedness": (
+            tuple(comm_of[u] for u in units),
+            _community_labels(n_comms, comm_of),
+        ),
+        "dependency": (
+            tuple(layer_of[u] for u in units),
+            tuple(_layer_label(i, n_layers) for i in range(n_layers)),
+        ),
+        # radial views share the grouping of their column/grid cousins — Orbits rings
+        # ARE dependency layers, Galaxy arms ARE communities — so the group labels the
+        # renderer floats at each ring/arm reuse the same vocabulary (user round 9)
+        "orbits": (
+            tuple(layer_of[u] for u in units),
+            tuple(_layer_label(i, n_layers) for i in range(n_layers)),
+        ),
+        "galaxy": (
+            tuple(comm_of[u] for u in units),
+            _community_labels(n_comms, comm_of),
+        ),
+    }
+
     offsets = _intra_offsets(node_list, radii)
     centers = {
+        # In the families view, nodes collapse to tight blobs at their family centre — they
+        # are hidden there, but the blob positions make view switches MORPH: nodes explode
+        # out of (and implode back into) their family.
+        "families": fam_c,
         "package": grid_c,
         "dependency": layer_c,
         "relatedness": comm_c,
@@ -168,24 +279,39 @@ def compute_layout(nodes: Iterable[Node], edges: Iterable[Edge]) -> LayoutResult
         "galaxy": galaxy_c,
         "globe": globe_c,
     }
+    # Families view: nodes render as STAR DUST inside their translucent family orb —
+    # each family's offsets scale to fill ~80% of its aggregate radius (user report:
+    # the top ring read cartoon-y; real structure inside the orbs gives it substance).
+    max_off = dict.fromkeys(fam_nodes, 1e-09)
+    for n in node_list:
+        f = family_of[n.unit]
+        d = math.hypot(offsets[n.id][0], offsets[n.id][1])
+        if d > max_off[f]:
+            max_off[f] = d
+    dust = {f: min(1.0, 0.8 * agg_radius(fam_counts[f]) / max_off[f]) for f in fam_nodes}
     positions = {
         view: {
-            n.id: (centers[view][n.unit][0] + offsets[n.id][0],
-                   centers[view][n.unit][1] + offsets[n.id][1])
+            n.id: (
+                centers[view][n.unit][0]
+                + (dust[family_of[n.unit]] if view == "families" else 1.0)
+                * offsets[n.id][0],
+                centers[view][n.unit][1]
+                + (dust[family_of[n.unit]] if view == "families" else 1.0)
+                * offsets[n.id][1],
+            )
             for n in node_list
         }
         for view in VIEWS
     }
 
-    subpkgs = sorted({_subpackage(u) for u in units})
     subpkg_color = {g: _PALETTE[i % len(_PALETTE)] for i, g in enumerate(subpkgs)}
-    n_layers = max(layer_of.values()) + 1
-    n_comms = max(comm_of.values()) + 1
     comm_fill = {n.id: _PALETTE[comm_of[n.unit] % len(_PALETTE)] for n in node_list}
     layer_fill = {
         n.id: _gradient(layer_of[n.unit] / max(n_layers - 1, 1)) for n in node_list
     }
+    fam_colour = {f: _PALETTE[FAMILIES.index(f) % len(_PALETTE)] for f in fam_nodes}
     fills = {
+        "families": {n.id: fam_colour[family_of[n.unit]] for n in node_list},
         "package": {n.id: subpkg_color[_subpackage(n.unit)] for n in node_list},
         "dependency": layer_fill,
         "relatedness": comm_fill,
@@ -194,18 +320,18 @@ def compute_layout(nodes: Iterable[Node], edges: Iterable[Edge]) -> LayoutResult
         "globe": comm_fill,
     }
     layer_key = [
-        (
-            "layer 0 (entry points)" if i == 0
-            else f"layer {i} (foundations)" if i == n_layers - 1
-            else f"layer {i}",
-            _gradient(i / max(n_layers - 1, 1)),
-        )
+        (_layer_label(i, n_layers), _gradient(i / max(n_layers - 1, 1)))
         for i in range(n_layers)
     ]
     comm_key = [
-        (_community_label(i, comm_of), _PALETTE[i % len(_PALETTE)]) for i in range(n_comms)
+        (nm, _PALETTE[i % len(_PALETTE)])
+        for i, nm in enumerate(_community_labels(n_comms, comm_of))
     ]
     legends = {
+        "families": [
+            (f"{f} · {fam_counts[f]} file" + ("s" if fam_counts[f] != 1 else ""), fam_colour[f])
+            for f in fam_nodes
+        ],
         "package": [(g, subpkg_color[g]) for g in subpkgs],
         "dependency": layer_key,
         "relatedness": comm_key,
@@ -215,9 +341,77 @@ def compute_layout(nodes: Iterable[Node], edges: Iterable[Edge]) -> LayoutResult
     }
     return LayoutResult(
         positions=positions, fills=fills, legends=legends, canvas=canvas,
+        enc_groups=enc_groups,
         cycle_units=cycle_units,
         globe_centers=globe3,
         globe_radius=globe_r,
+        family_of=family_of,
+        fam_nodes=fam_nodes,
+        fam_centers=fam_centers,
+        fam_counts=fam_counts,
+        fam_matrix=fam_matrix,
+    )
+
+
+def agg_radius(count: int) -> float:
+    """Aggregate-circle radius from its file count (shared by layout dust + renderer)."""
+    return min(40.0, 10.0 + 5.0 * math.log2(1 + count))
+
+
+def ring_centers(names: tuple[str, ...], canvas: float) -> dict[str, tuple[float, float]]:
+    """Aggregate-circle centres on a ring around the canvas centre (first at 12 o'clock).
+
+    Shared by the family ring and the per-family subpackage rings (same grammar).
+    """
+    return _family_centers(names, canvas)
+
+
+def _family_centers(fam_nodes: tuple[str, ...], canvas: float) -> dict[str, tuple[float, float]]:
+    """Family aggregate centres on a ring around the canvas centre (core at 12 o'clock).
+
+    The radius adapts to the canvas but is clamped so the biggest aggregate circle (r<=40)
+    plus its label stays inside the padding on small canvases, and never collapses below a
+    readable separation.
+    """
+    half = canvas / 2
+    if len(fam_nodes) <= 1:
+        return dict.fromkeys(fam_nodes, (half, half))
+    # compact: nodes/labels sit close enough to read after fit() (user: "unnecessarily
+    # far apart"); the ring grows with the family count, not the whole canvas
+    radius = max(30.0, min(half - _PAD - 45.0, 110.0 + 34.0 * len(fam_nodes)))
+    step = 2 * math.pi / len(fam_nodes)
+    return {
+        f: (half + radius * math.cos(-math.pi / 2 + i * step),
+            half + radius * math.sin(-math.pi / 2 + i * step))
+        for i, f in enumerate(fam_nodes)
+    }
+
+
+def _family_matrix(
+    nodes: list[Node], edges: Iterable[Edge], family_of: dict[str, str]
+) -> tuple[tuple[str, str, str, int], ...]:
+    """Directed, typed, cross-family edge counts: ((src_fam, dst_fam, type, count), ...).
+
+    Aggregates EVERY edge type except ``defines`` (intra-unit by construction, so it can
+    never cross families — skipped explicitly for robustness). Intra-family and dangling
+    edges are excluded. Sorted by family precedence then type for determinism.
+    """
+    unit_of = {n.id: n.unit for n in nodes}
+    counts: Counter[tuple[str, str, str]] = Counter()
+    for edge in edges:
+        if edge.type == EdgeType.DEFINES:
+            continue
+        src_unit = unit_of.get(edge.src)
+        dst_unit = unit_of.get(edge.dst)
+        if src_unit is None or dst_unit is None:
+            continue
+        fs, fd = family_of[src_unit], family_of[dst_unit]
+        if fs != fd:
+            counts[(fs, fd, edge.type.value)] += 1
+    order = {f: i for i, f in enumerate(FAMILIES)}
+    return tuple(
+        (fs, fd, t, counts[(fs, fd, t)])
+        for fs, fd, t in sorted(counts, key=lambda k: (order[k[0]], order[k[1]], k[2]))
     )
 
 
@@ -240,15 +434,45 @@ def _unit_radii(members: list[Node]) -> tuple[float, float]:
     return inner, max(outer, inner + _NODE_SPACING)
 
 
-def _flow_centers(order: list[str], cell: float) -> tuple[dict[str, tuple[float, float]], float]:
-    """Place units in a left-to-right, top-to-bottom grid flow at ``cell`` spacing."""
-    cols = max(1, math.ceil(math.sqrt(len(order))))
-    centers = {
-        u: (_PAD + cell * (i % cols + 0.5), _PAD + cell * (i // cols + 0.5))
-        for i, u in enumerate(order)
-    }
-    rows = math.ceil(len(order) / cols)
-    return centers, max(cols, rows) * cell
+def _block_centers(
+    order: list[str], group_of: dict[str, str], cell: float
+) -> tuple[dict[str, tuple[float, float]], float]:
+    """GROUP-MAJOR shelf packing: each group gets its own near-square block of cells,
+    blocks flow left-to-right with gutters and wrap into shelves.
+
+    Round 8 (user): the row-wrap grid interleaved groups, so the per-group territory
+    boxes drawn behind detail views overlapped into noise — blocks make every group a
+    disjoint region by construction.
+    """
+    groups: dict[str, list[str]] = {}
+    for unit in order:  # group order = first appearance in the given unit order
+        groups.setdefault(group_of[unit], []).append(unit)
+    total = max(1, len(order))
+    target_w = math.ceil(math.sqrt(total) * 1.25) * cell
+    gutter = 0.8 * cell
+    centers: dict[str, tuple[float, float]] = {}
+    x = 0.0
+    y = 0.0
+    shelf_h = 0.0
+    max_w = 0.0
+    for members in groups.values():
+        n = len(members)
+        gcols = max(1, math.ceil(math.sqrt(n)))
+        grows = math.ceil(n / gcols)
+        bw, bh = gcols * cell, grows * cell
+        if x > 0 and x + bw > target_w:  # wrap to a new shelf
+            x = 0.0
+            y += shelf_h + gutter
+            shelf_h = 0.0
+        for j, unit in enumerate(members):
+            centers[unit] = (
+                _PAD + x + cell * (j % gcols + 0.5),
+                _PAD + y + cell * (j // gcols + 0.5),
+            )
+        x += bw + gutter
+        shelf_h = max(shelf_h, bh)
+        max_w = max(max_w, x - gutter)
+    return centers, max(max_w, y + shelf_h)
 
 
 def _layer_centers(
@@ -331,16 +555,29 @@ def _galaxy_centers(
 
 
 def _globe_centers(
-    order: list[str], cell: float
+    order: list[str], cell: float, weight_of: dict[str, float] | None = None
 ) -> tuple[dict[str, tuple[float, float, float]], float, float]:
     """Fibonacci sphere in 3D — the JS projects and rotates it. Returns (xyz per unit, sphere
     radius, canvas size). The 2D "globe" view positions are the yaw-0 orthographic projection,
-    so the standard view-morph animates INTO the sphere before the JS takes over rotation."""
+    so the standard view-morph animates INTO the sphere before the JS takes over rotation.
+
+    The heaviest-connected units take the most EQUATORIAL slots (globe review G4: a hub
+    at a pole turned its edges into a convergence fountain); ties and the unweighted case
+    keep the incoming order. Deterministic throughout.
+    """
     n = max(len(order), 1)
     radius = max(cell * 2.2, cell * math.sqrt(n) * 0.62)
     golden = math.pi * (3 - math.sqrt(5))
+    if not order:  # review LOW: zip(strict) raised on the (unreachable-today) empty case
+        return {}, radius, 2 * (radius + cell)
+    # Fibonacci index i=0 is a pole; indexes near n/2 hug the equator. Hand the most
+    # central indexes to the heaviest units (stable name tie-break).
+    by_weight = sorted(order, key=lambda u: (-(weight_of or {}).get(u, 0.0), u))
+    centre_out = sorted(range(n), key=lambda i: (abs(i - (n - 1) / 2), i))
+    slot = dict(zip(by_weight, centre_out, strict=True))
     centers3: dict[str, tuple[float, float, float]] = {}
-    for i, unit in enumerate(order):
+    for unit in order:
+        i = slot[unit]
         y = 1 - 2 * (i + 0.5) / n  # -1..1
         ring = math.sqrt(max(0.0, 1 - y * y))
         theta = i * golden

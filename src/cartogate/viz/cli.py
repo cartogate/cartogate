@@ -46,7 +46,10 @@ def cmd_viz(
     if "html" in formats:
         path = out_dir / "graph.html"
         path.write_text(
-            to_html(nodes, edges, title=root.name, max_nodes=max_nodes), encoding="utf-8"
+            to_html(nodes, edges, title=root.name, max_nodes=max_nodes,
+                    # units are repo-prefixed (root.name/...), so the editor-link base is the
+                    # PARENT (blind verifier AC-24: joining root doubled the segment)
+                    source_root=str(root.resolve().parent)), encoding="utf-8"
         )
         written.append(path)
 
