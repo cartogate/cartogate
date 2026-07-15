@@ -36,6 +36,12 @@ _EXPECTED_SCRIPTS = {
     "carto": "cartogate.cli:main",
     # a thin entry that checks for the optional MCP SDK before importing the server
     "cartogate-mcp": "cartogate.mcp._entry:main",
+    # the write-time hard gate (PreToolUse / pre_write_code)
+    "cartogate-write-gate": "cartogate.writegate:main",
+    # the commit gate as a console script
+    "cartogate-precommit": "cartogate.precommit:main",
+    # the grep-nudge advisory hook for symbol-shaped grep patterns
+    "cartogate-grep-nudge": "cartogate.grepnudge:main",
 }
 
 

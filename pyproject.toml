@@ -85,6 +85,8 @@ cartogate-write-gate = "cartogate.writegate:main"
 # The commit gate as a console script: PATH-resolved from the pipx venv, so the git hook
 # never depends on which `python` is first on PATH (field bug, 2026-07-04).
 cartogate-precommit = "cartogate.precommit:main"
+# The grep-nudge PreToolUse advisory hook: watches grep/rg calls and nudges on symbol patterns.
+cartogate-grep-nudge = "cartogate.grepnudge:main"
 
 # Git-derived version (declared dynamic above): tags (v0.1.0) set the release base and every
 # commit past a tag gets a dev suffix + the short hash. The fallback covers building from a

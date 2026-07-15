@@ -40,6 +40,21 @@ and reuse any existing symbol it returns.
 `find_symbol` / `find_references`. Review health with `find_cycles`,
 `find_duplicate_bodies`, `find_dead_code`.
 
+## cartogate vs grep
+
+Reach for cartogate FIRST when the question is structural - it answers with resolved facts and
+file:line locations in one call:
+- who calls / references X -> `find_references` (call sites included)
+- what breaks if X changes -> `blast_radius` / `impact_summary`
+- does X already exist -> `check_duplicate` / `find_symbol`
+- who implements/subclasses X -> `implementations`
+- show me X's code -> `read_symbol`
+- orient in this repo -> `repo_map` (first call in an unfamiliar codebase)
+
+grep/find remain right for raw text: comments, strings, logs, config, TODOs, and anything not
+indexed. If a grep for an identifier comes back noisy, that is the cue to switch to
+`find_references`.
+
 These MCP tools are deterministic and rest only on EXTRACTED structural facts. A BLOCK means a
 real duplicate/contract break — fix the underlying issue.
 
@@ -249,6 +264,7 @@ def _append_agents_md(root: Path, report: _Report) -> None:
 
 
 WRITE_GATE_COMMAND = "cartogate-write-gate"
+GREP_NUDGE_COMMAND = "cartogate-grep-nudge"
 
 
 def _install_write_hook_claude(root: Path, report: _Report) -> None:
@@ -283,6 +299,40 @@ def _install_write_hook_claude(root: Path, report: _Report) -> None:
     data["hooks"] = hooks
     _write_json(path, data, report)
     report.did(f"{rel}  (PreToolUse write gate → {WRITE_GATE_COMMAND})")
+
+
+def _install_grep_nudge_claude(root: Path, report: _Report) -> None:
+    """Wire the grep nudge into ``.claude/settings.json`` (PreToolUse) — merge-safe, idempotent.
+
+    Existing hooks are preserved; ours is appended only if no PreToolUse entry already invokes
+    the grep-nudge command.
+    """
+    rel = ".claude/settings.json"
+    path = root / rel
+    data = _read_json(path)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        if hooks is not None:
+            report.note(
+                f"{rel} 'hooks' was not an object ({type(hooks).__name__}) — replacing"
+            )
+        hooks = {}
+    entries = hooks.get("PreToolUse")
+    if not isinstance(entries, list):
+        entries = []
+    if any(GREP_NUDGE_COMMAND in json.dumps(e) for e in entries):
+        report.skip(f"{rel} already wires the grep nudge")
+        return
+    entries.append(
+        {
+            "matcher": "Grep",
+            "hooks": [{"type": "command", "command": GREP_NUDGE_COMMAND}],
+        }
+    )
+    hooks["PreToolUse"] = entries
+    data["hooks"] = hooks
+    _write_json(path, data, report)
+    report.did(f"{rel}  (PreToolUse grep nudge → {GREP_NUDGE_COMMAND})")
 
 
 def _install_write_hook_windsurf(root: Path, report: _Report) -> None:
@@ -438,6 +488,7 @@ def run(
         # (STRATEGY.md law 2). One installed command, wired per harness.
         if "claude" in agents:
             _install_write_hook_claude(repo, report)
+            _install_grep_nudge_claude(repo, report)
         if "windsurf" in agents:
             _install_write_hook_windsurf(repo, report)
         if "codex" in agents:

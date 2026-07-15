@@ -11,6 +11,7 @@ never blocks).
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from cartogate.engine.architecture import CYCLE_LIMIT
@@ -28,9 +29,9 @@ from cartogate.engine.localize import DEFAULT_MAX_DEPTH
 from cartogate.engine.localize import localize as _localize
 from cartogate.engine.pdg import build_pdg as _build_pdg
 from cartogate.engine.traversal import REFERENCE_EDGE_TYPES, GatingTraversal
-from cartogate.schema.enums import EdgeType, Language, NodeKind
+from cartogate.schema.enums import Confidence, EdgeType, Language, NodeKind, Visibility
 from cartogate.schema.nodes import Node
-from cartogate.store.base import StoreInterface
+from cartogate.store.base import Direction, StoreInterface
 
 #: Cap on the candidate/hint names returned by a failed symbol lookup — enough to disambiguate,
 #: small enough to never flood the agent's context.
@@ -39,6 +40,18 @@ _CANDIDATE_LIMIT = 8
 #: Cap on a symbol-name query. No real qualified name approaches this; anything longer is junk
 #: input not worth a full-graph scan.
 _MAX_NAME_LEN = 512
+
+#: Cap on source code lines returned by read_symbol. Prevents flooding the agent's context
+#: with huge symbol bodies (templates, generated code, etc.).
+MAX_SOURCE_LINES = 120
+
+#: Cap on the top-level public exports listed per unit in repo_map's overview mode — enough to
+#: convey a module's surface without dumping every symbol (the count over the cap is reported).
+EXPORTS_CAP = 8
+
+#: The synthetic unit holding external (third-party) package nodes. Excluded from repo_map's
+#: overview, which describes the repo's own modules (mirrors families.py's local declaration).
+_EXTERNALS_UNIT = "<externals>"
 
 #: JSON-Schema tool definitions (name/description/input schema) for ``list_tools``.
 TOOL_SPECS: list[dict[str, Any]] = [
@@ -69,8 +82,8 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "blast_radius",
         "description": (
-            "Before modifying an exported symbol, list the symbols that depend on it "
-            "(its blast radius) over EXTRACTED structural edges."
+            "Before modifying an exported symbol, use this instead of grep to find what depends on "
+            "it — returns RESOLVED dependents over structural edges, not raw text matches."
         ),
         "input_schema": {
             "type": "object",
@@ -93,8 +106,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "find_symbol",
         "description": (
-            "Look up a symbol by name — bare ('login'), dotted suffix ('auth.login'), or "
-            "fully qualified. On a miss the result lists candidate full names."
+            "Use instead of grep when you need to resolve a symbol by name (bare, suffix, or "
+            "fully qualified) — returns RESOLVED qnames with locations, not raw text. Grep is "
+            "better for raw text/comments/config."
         ),
         "input_schema": {
             "type": "object",
@@ -105,7 +119,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "find_references",
         "description": (
-            "List the symbols that reference or call a given symbol (bare/suffix/full name)."
+            "Use instead of grep to find all callers/references of a symbol — returns RESOLVED "
+            "callers over structural edges with file:line, not raw text hits including comments "
+            "and strings."
         ),
         "input_schema": {
             "type": "object",
@@ -147,16 +163,17 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "find_cycles",
         "description": (
-            "Architecture gate: list module-level import cycles (circular dependencies) in the "
-            "graph — a whole-program check no single-file view can make. Takes no input."
+            "Use to detect module-level import cycles (circular dependencies) — a whole-program "
+            "structural check no single-file view can make. Takes no input."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "find_duplicate_bodies",
         "description": (
-            "Advisory: list groups of functions whose body is an identical copy-paste (even "
-            "across a rename) — what the signature-exact duplicate gate misses. Never blocks."
+            "Use to find groups of functions with identical copy-pasted bodies (even across "
+            "renames) — catches what the signature-exact duplicate gate misses. Advisory, "
+            "never blocks."
         ),
         "input_schema": {
             "type": "object",
@@ -175,10 +192,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "impact_summary",
         "description": (
-            "PR-time impact summary: for the changed symbols, list who is affected (blast radius), "
-            "which tests to run, and which docs may be stale — the three advisory views composed "
-            "into one report. Pass `symbols` (bare/suffix/full names) or a unified `diff`. "
-            "Never blocks."
+            "Use at PR time to summarize impact: for changed symbols, lists who is affected, which "
+            "tests to run, and which docs may be stale. Pass `symbols` (bare/suffix/full names) or "
+            "a unified `diff`. Advisory, never blocks."
         ),
         "input_schema": {
             "type": "object",
@@ -192,11 +208,10 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "localize",
         "description": (
-            "Debug a failing test: rank the likely culprits as the symbols the test exercises that "
-            "the change touched (reach ∩ diff), nearest to the test first. Pass the failing `test` "
-            "(bare/suffix/full name) and a unified `diff` of the change. The reach is searched up "
-            "to `depth` hops (default 4); raise it if the suspect may be deep. Advisory, never "
-            "blocks."
+            "Use when debugging a failing test: ranks likely culprits as symbols the test "
+            "exercises that the change touched (reach ∩ diff), nearest to the test first. Pass "
+            "the failing `test` (bare/suffix/full name) and a unified `diff`. The reach is "
+            "searched up to `depth` hops (default 4). Advisory, never blocks."
         ),
         "input_schema": {
             "type": "object",
@@ -214,10 +229,10 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "slice",
         "description": (
-            "Program slice (Python or JS/TS): given a function's `source` and a 1-based `line`, "
-            "return the statements that AFFECT that line (a backward slice — over control + data "
-            "dependence), or with `forward: true` the statements that line AFFECTS. For debugging, "
-            "pass the source of the file containing the failing assertion. Advisory — never blocks."
+            "Use to compute program slices (Python/JS/TS): given a `source` and 1-based `line`, "
+            "returns statements that AFFECT that line (backward slice — control + data dependence) "
+            "or statements that line AFFECTS (forward slice). For debugging, pass the source file "
+            "containing the failing assertion. Advisory, never blocks."
         ),
         "input_schema": {
             "type": "object",
@@ -237,13 +252,56 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "find_dead_code",
         "description": (
-            "Advisory: list top-level INTERNAL symbols with no in-repo reference — dead-code "
+            "Use to find top-level INTERNAL symbols with no in-repo reference — dead-code "
             "candidates. Conservative (internal-only, top-level-only; tests/entrypoints/dunders "
-            "excluded) and never blocks; dynamic dispatch / reflection / framework registration "
-            "can still make one live (and in Go/Rust a function passed as a callback argument), so "
-            "review before deleting. Takes no input."
+            "excluded). Advisory, never blocks; dynamic dispatch/reflection/registration can "
+            "still make one live, so review before deleting. Takes no input."
         ),
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_symbol",
+        "description": (
+            "Use when you need to SEE a symbol's actual code. One call instead of grep + reading "
+            "the whole file — returns the exact source span. Shows location context and detects "
+            "when root is unknown or file is missing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"qualified_name": {"type": "string"}},
+            "required": ["qualified_name"],
+        },
+    },
+    {
+        "name": "implementations",
+        "description": (
+            "Use when you need who implements/subclasses X. Grep text-matching misses resolved "
+            "cross-file inheritance — this traverses the graph's INHERITS/IMPLEMENTS edges "
+            "instead. Advisory, never blocks."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"qualified_name": {"type": "string"}},
+            "required": ["qualified_name"],
+        },
+    },
+    {
+        "name": "repo_map",
+        "description": (
+            "First call in an unfamiliar repo: one call returns the module map — units, sizes, "
+            "public exports, dependency direction — replacing the exploratory grep/ls storm. "
+            "Use module=<unit path> to zoom into one file's exports and dependents."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "module": {
+                    "type": "string",
+                    "description": "Optional unit path to zoom into.",
+                }
+            },
+            "required": [],
+        },
     },
 ]
 
@@ -251,11 +309,12 @@ TOOL_SPECS: list[dict[str, Any]] = [
 class CartogateTools:
     """Implements the MCP tools over a store (check_duplicate + the advisory queries)."""
 
-    def __init__(self, store: StoreInterface) -> None:
+    def __init__(self, store: StoreInterface, root: Path | str | None = None) -> None:
         self._store = store
         self._block = BlockEngine(store)
         self._traversal = GatingTraversal(store)
         self._flag = FlagEngine(store)
+        self._root = Path(root) if root is not None else None
 
     def _symbol_nodes(self) -> list[Node]:
         nodes = (self._store.get_node(i) for i in self._store.visible_node_ids())
@@ -421,7 +480,28 @@ class CartogateTools:
             return {"found": False, "qualified_name": qualified_name, "candidates": candidates,
                     "references": [], "count": 0}
         callers = self._traversal.callers(node.id, depth=1, edge_types=REFERENCE_EDGE_TYPES)
-        refs = sorted((_node_brief(n) for n in callers), key=lambda b: b["qualified_name"])
+
+        # Attach exact call sites per caller. Iterate the caller NODES directly (not a name
+        # re-match) so overloaded callers that share a qualified_name each get their own sites.
+        # Constrain the site query to EXTRACTED, matching the gate traversal that produced the
+        # callers — an INFERRED edge must never leak a site into this result (risk R7).
+        refs = []
+        for caller in sorted(callers, key=lambda n: n.qualified_name):
+            edges = self._store.neighbors(
+                caller.id,
+                edge_types=REFERENCE_EDGE_TYPES,
+                direction=Direction.OUT,
+                confidence=(Confidence.EXTRACTED,),
+            )
+            sites = sorted({
+                f"{e.source_location.path}:{e.source_location.line}"
+                for e in edges
+                if e.dst == node.id and e.source_location is not None
+            })
+            brief = _node_brief(caller)
+            brief["sites"] = sites
+            refs.append(brief)
+
         return {
             "found": True,
             "qualified_name": node.qualified_name,  # canonical
@@ -512,6 +592,209 @@ class CartogateTools:
         sliced = pdg.forward_slice([seed]) if forward else pdg.backward_slice([seed])
         return {"found": True, "forward": forward, **pdg.to_dict(sliced)}
 
+    def implementations(self, qualified_name: str) -> dict[str, Any]:
+        """Find all classes/interfaces that implement or subclass a given type.
+
+        Resolves the base type by name (bare/suffix/full), then returns all nodes with
+        INHERITS or IMPLEMENTS edges pointing to it. Sorted by qualified name for determinism.
+        """
+        node, candidates = self._resolve_symbol(qualified_name)
+        if node is None:
+            return {"found": False, "qualified_name": qualified_name, "candidates": candidates,
+                    "implementations": [], "count": 0}
+        # Query for both INHERITS and IMPLEMENTS edges (any subclass/implementer of node)
+        inheritance_types = [EdgeType.INHERITS, EdgeType.IMPLEMENTS]
+        impls = self._traversal.callers(node.id, depth=1, edge_types=inheritance_types)
+        briefs = sorted((_node_brief(n) for n in impls), key=lambda b: b["qualified_name"])
+        return {
+            "found": True,
+            "qualified_name": node.qualified_name,  # canonical
+            "implementations": briefs,
+            "count": len(briefs),
+        }
+
+    def read_symbol(self, qualified_name: str) -> dict[str, Any]:
+        """Return the actual source code of a symbol.
+
+        Resolves the symbol by name, then reads its source span from disk (if root is known),
+        capping at MAX_SOURCE_LINES to prevent flooding the context.
+        """
+        node, candidates = self._resolve_symbol(qualified_name)
+        if node is None:
+            return {"found": False, "qualified_name": qualified_name, "candidates": candidates}
+
+        result: dict[str, Any] = {
+            "found": True,
+            "qualified_name": node.qualified_name,
+            "signature": node.signature,
+            "location": f"{node.location.path}:{node.location.start_line}-{node.location.end_line}",
+        }
+
+        # If no root, return found=True but source=None with a note
+        if self._root is None:
+            result["source"] = None
+            result["note"] = "workspace root unknown — pass root or use read tool"
+            return result
+
+        # Resolve the file. ``location.path`` is recorded relative to the index base
+        # (root.parent — units are repo-prefixed, e.g. "myrepo/src/foo.py"), so it must be
+        # resolved against the repo root's PARENT, not the repo root itself, or the repo
+        # segment doubles and every read misses (the viz source_root=root.parent lesson).
+        base = self._root.parent.resolve()
+        file_path = (base / node.location.path).resolve()
+        # Containment guard (defense-in-depth): a Path join silently discards the base when the
+        # right side is absolute, so a non-conforming/absolute location.path would otherwise read
+        # an arbitrary local file. location.path is producer-guaranteed relative today; this keeps
+        # the read confined to the workspace regardless.
+        if not file_path.is_relative_to(base):
+            result["source"] = None
+            result["note"] = f"source path outside workspace: {node.location.path}"
+            result["truncated"] = False
+            return result
+        try:
+            # UTF-8 to match the extract pipeline's own read (pipeline.py) — the platform default
+            # (cp1252 on Windows) would silently mojibake any non-ASCII source.
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            result["source"] = None
+            result["note"] = f"source file not found: {node.location.path}"
+            result["truncated"] = False
+            return result
+
+        # Extract the source span (1-based line numbers, inclusive). split on "\n" to mirror
+        # tree-sitter's row counting exactly; read_text() already normalizes CRLF/CR to "\n" via
+        # universal-newline mode, so no carriage returns survive.
+        lines = content.split("\n")
+        start_idx = max(0, node.location.start_line - 1)
+        end_idx = min(len(lines), node.location.end_line)
+        source_lines = lines[start_idx:end_idx]
+
+        # Cap at MAX_SOURCE_LINES
+        truncated = len(source_lines) > MAX_SOURCE_LINES
+        if truncated:
+            source_lines = source_lines[:MAX_SOURCE_LINES]
+
+        result["source"] = "\n".join(source_lines)
+        result["truncated"] = truncated
+        return result
+
+    def repo_map(self, module: str | None = None) -> dict[str, Any]:
+        """Repo orientation: list all units with exports, or zoom into one module.
+
+        Overview mode (module=None): lists all units with symbol counts, top-level public exports
+        (capped at EXPORTS_CAP=8), and summary statistics.
+
+        Detail mode (module=str): for an exact unit match, returns full exports (uncapped) and
+        the units that import from this one (dependents).
+
+        Miss mode: returns found=False with candidates matching basename or path suffix.
+        """
+        if module is None:
+            # Overview: iterate the repo's own units, collect exports + counts.
+            units = []
+            total_nodes = 0
+            total_edges = 0
+
+            for unit, nodes, edges in self._store.iter_unit_facts():
+                # Skip the synthetic <externals> unit — it is not a file in the repo, and listing
+                # it as one confuses the orientation this tool exists to give.
+                if unit == _EXTERNALS_UNIT:
+                    continue
+                total_edges += len(edges)
+
+                # Count SYMBOL nodes only — the per-file MODULE node is structural, not a symbol,
+                # and counting it would report a file with 3 functions as having 4 symbols.
+                unit_symbols = [n for n in nodes if n.kind is NodeKind.SYMBOL]
+                total_nodes += len(unit_symbols)
+
+                # Exports: top-level public symbols only.
+                exports = [
+                    {"name": n.name, "signature": n.signature}
+                    for n in unit_symbols
+                    if n.is_top_level and n.visibility is not Visibility.INTERNAL
+                ]
+                exports = sorted(exports, key=lambda e: str(e["name"]))
+
+                # Cap exports
+                capped_exports = exports[:EXPORTS_CAP]
+                unit_dict: dict[str, Any] = {
+                    "unit": unit,
+                    "symbols": len(unit_symbols),
+                    "exports": capped_exports,
+                }
+                if len(exports) > EXPORTS_CAP:
+                    unit_dict["more"] = len(exports) - EXPORTS_CAP
+
+                units.append(unit_dict)
+
+            # Sort for cross-backend determinism — every other list result in this module does.
+            units = sorted(units, key=lambda u: u["unit"])
+            return {
+                "units": units,
+                "unit_count": len(units),
+                "node_count": total_nodes,
+                "edge_count": total_edges,
+            }
+
+        else:
+            # Detail: exact unit match - search through all units
+            target_nodes = None
+
+            for unit, nodes, _edges in self._store.iter_unit_facts():
+                if unit == module:
+                    target_nodes = nodes
+                    break
+
+            if target_nodes is None:
+                # No match: find candidates by basename or suffix
+                all_units = list(self._store.units())
+                basename = module.rsplit("/", 1)[-1]
+
+                candidates = [
+                    u for u in all_units
+                    if u.endswith(basename) or u.endswith("/" + basename)
+                ]
+                # Also include units sharing the basename
+                candidates += [u for u in all_units if u.rsplit("/", 1)[-1] == basename]
+                candidates = sorted(set(candidates))[:5]
+
+                return {
+                    "found": False,
+                    "unit": module,
+                    "candidates": candidates,
+                }
+
+            # Exact match: get exports and dependents
+            nodes = target_nodes
+
+            # Exports: all top-level symbols (uncapped)
+            exports = [
+                {**_node_brief(n), "name": n.name}
+                for n in nodes
+                if n.kind is NodeKind.SYMBOL and n.is_top_level
+            ]
+            exports = sorted(exports, key=lambda e: str(e["qualified_name"]))
+
+            # Dependents: units that import from this unit's nodes
+            # Iterate through all units to find imports-type edges pointing to our nodes
+            node_ids = {n.id for n in nodes}
+            dependents_set = set()
+            for other_unit, _, other_edges in self._store.iter_unit_facts():
+                for edge in other_edges:
+                    if edge.type is EdgeType.IMPORTS and edge.dst in node_ids:
+                        # This unit imports from the target unit
+                        dependents_set.add(other_unit)
+                        break  # Found at least one import, can move to next unit
+
+            dependents = sorted(dependents_set)
+
+            return {
+                "found": True,
+                "unit": module,
+                "exports": exports,
+                "dependents": dependents,
+            }
+
 
 def dispatch(tools: CartogateTools, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Route a tool call by name to the matching method. Raises on an unknown tool."""
@@ -570,6 +853,12 @@ def dispatch(tools: CartogateTools, name: str, arguments: dict[str, Any]) -> dic
         return tools.find_duplicate_bodies(
             min_lines=int(arguments.get("min_lines", DEFAULT_MIN_LINES))
         )
+    if name == "read_symbol":
+        return tools.read_symbol(arguments["qualified_name"])
+    if name == "implementations":
+        return tools.implementations(arguments["qualified_name"])
+    if name == "repo_map":
+        return tools.repo_map(module=arguments.get("module"))
     raise ValueError(f"unknown tool: {name!r}")
 
 
@@ -589,11 +878,13 @@ def _parse_edge_types(edge_types: Iterable[str] | None) -> list[EdgeType] | None
 
 
 def _node_brief(node: Node) -> dict[str, Any]:
-    """A compact node view (qualified name, kind, unit) for list results."""
+    """A compact node view (qualified name, kind, unit, location, signature) for list results."""
     return {
         "qualified_name": node.qualified_name,
         "kind": node.kind.value,
         "unit": node.unit,
+        "location": f"{node.location.path}:{node.location.start_line}",
+        "signature": node.signature,
     }
 
 

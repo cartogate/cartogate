@@ -655,7 +655,7 @@ def build_lazy_server(
             # timeout on big repos (the hang-then-empty class #99 fixed for _activate).
             box, t0 = await _bounded_prime(state["refresh"])
             if "store" in box:
-                state["tools"] = CartogateTools(box["store"])
+                state["tools"] = CartogateTools(box["store"], root=state["repo"])
                 _LOG.info(
                     "index ready: %d nodes in %.1fs (rss %s MB)",
                     len(box["store"].visible_node_ids()),
@@ -684,7 +684,7 @@ def build_lazy_server(
             t0 = time.monotonic()
             new_store = await anyio.to_thread.run_sync(state["refresh"].maybe_refresh)
             if new_store is not None:
-                state["tools"] = CartogateTools(new_store)
+                state["tools"] = CartogateTools(new_store, root=state["repo"])
                 # state["refresh"], not the outer `refresh` (None in a deferred session).
                 info = getattr(state["refresh"], "last_refresh", None)
                 _LOG.info(
@@ -748,7 +748,7 @@ def build_lazy_server(
                 # (checked before constructing another refresher: exactly one build per root).
                 if "store" in pending["box"]:
                     state["refresh"], state["repo"] = pending["refresh"], root
-                    state["tools"] = CartogateTools(pending["box"]["store"])
+                    state["tools"] = CartogateTools(pending["box"]["store"], root=root)
                     state["resolve_after"], daemon_on[0] = 0.0, False
                     state["indexing"] = None
                     state["resolved_via"] = "agent"
@@ -798,7 +798,7 @@ def build_lazy_server(
                     "call in ~30 seconds",
                 }
             state["refresh"], state["repo"] = new_refresh, root
-            state["tools"] = CartogateTools(box["store"])
+            state["tools"] = CartogateTools(box["store"], root=root)
             state["resolve_after"], daemon_on[0] = 0.0, False
             state["indexing"] = None  # this activation supersedes any detached build
             state["resolved_via"] = "agent"
@@ -830,7 +830,7 @@ def build_lazy_server(
                 }
             if "store" in box:  # done — commit and serve this very call
                 state["refresh"], state["repo"] = pending["refresh"], pending["root"]
-                state["tools"] = CartogateTools(box["store"])
+                state["tools"] = CartogateTools(box["store"], root=pending["root"])
                 state["resolve_after"], daemon_on[0] = 0.0, False
                 state["indexing"] = None
                 state["resolved_via"] = pending.get("via", "agent")
