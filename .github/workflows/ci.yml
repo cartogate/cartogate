@@ -80,6 +80,44 @@ jobs:
       - name: Security scan (pip-audit)
         run: pip-audit
 
+  nav-e2e:
+    name: Nav E2E (live browsers, both drivers)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs derives the version from tags + history
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install -e ".[dev,nav,nav-selenium]" pytest-rerunfailures
+
+      - name: Install chromium (Playwright)
+        run: playwright install --with-deps chromium
+
+      # The full nav loop against a freshly generated viz, per driver: extract
+      # -> viz -> serve -> navigate by the map -> machine-manifested evidence.
+      # This is ALSO the live cross-driver conformance suite: identical map,
+      # identical app, both adapters must land on the same states. Selenium
+      # uses the runner's preinstalled Chrome (selenium-manager resolves the
+      # driver). The e2e marker is deselected everywhere else; -m e2e here
+      # overrides the pyproject addopts.
+      # --reruns 1: live-browser tests carry an empirically measured ~10%
+      # per-run host-contention flake (Page.goto load-timeout signature); one
+      # scoped retry absorbs it without masking real regressions (which fail
+      # deterministically — the two runtime bugs this suite caught did).
+      - name: Nav E2E (pytest -m e2e)
+        run: pytest -m e2e -v --reruns 1
+
   value-study:
     name: Value study (deterministic layer)
     runs-on: ubuntu-latest

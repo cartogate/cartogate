@@ -119,11 +119,19 @@ def find_duplicate_signatures(nodes: list[Node]) -> dict[tuple[Language, str], l
     (the same function written twice) — not a symbol matching itself. Grouping includes the
     language so a Python and a TypeScript symbol with the same shape are not flagged as
     duplicates. Only top-level functions/classes are considered: methods of different classes
-    legitimately share signatures (an ABC and its impl, unrelated ``__init__``s).
+    legitimately share signatures (an ABC and its impl, unrelated ``__init__``s). Symbols
+    named ``main`` are exempt for the same reason — the per-module CLI entry point is a
+    convention, not reuse-able duplication (field evidence 2026-07-17: this repo's own gate
+    blocked a new CLI module for joining the 16 idiomatic ``main(argv)`` entrypoints).
     """
     groups: dict[tuple[Language, str], list[Node]] = defaultdict(list)
     for node in nodes:
-        if node.kind is NodeKind.SYMBOL and node.signature is not None and node.is_top_level:
+        if (
+            node.kind is NodeKind.SYMBOL
+            and node.signature is not None
+            and node.is_top_level
+            and node.name != "main"
+        ):
             groups[(node.language, normalize_signature(node.signature, node.language))].append(node)
     return {
         key: members

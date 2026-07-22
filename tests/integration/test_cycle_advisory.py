@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.conftest import write_file as _write
 
 from cartogate.precommit import main as precommit_main
 
@@ -27,10 +28,6 @@ def _git(repo: Path, *args: str) -> None:
     )
 
 
-def _write(repo: Path, rel: str, body: str) -> None:
-    path = repo / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
 
 
 def test_staged_change_introducing_a_cycle_is_reported(

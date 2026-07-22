@@ -1,0 +1,4 @@
+{
+  "name": "nextjs-pages-fixture",
+  "dependencies": { "next": "16.0.0" }
+}

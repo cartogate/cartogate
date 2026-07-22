@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from hashlib import blake2b
 from pathlib import Path
 
-from cartogate.extract.pipeline import iter_files
+from cartogate.extract.walk import iter_files
 from cartogate.schema.edges import Edge, SourceLocation
 from cartogate.schema.enums import Confidence, EdgeType, NodeKind, Provenance, Visibility
 from cartogate.schema.nodes import Location, Node

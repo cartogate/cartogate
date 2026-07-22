@@ -1,6 +1,6 @@
 """Block messages must convert a BLOCK into self-correction, not a retry loop.
 
-Evidence (docs/dev/STRATEGY.md design law 1): the shape that works is
+Evidence (design law 1): the shape that works is
 BLOCKED (what) -> EVIDENCE (the extracted fact, file:line) -> ACTION (the one sanctioned next
 step) -> anti-loop ("do NOT retry identical / do not rename to evade"). Measured effect:
 identical-retry loops ~60% -> ~10% on message shape alone.

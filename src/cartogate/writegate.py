@@ -154,6 +154,33 @@ def _editing_unit(file_path: str, repo: Path) -> str | None:
         return None
 
 
+def _record_write_blocks(
+    payload: dict[str, object], blocked: list[dict[str, object]], repo: Path
+) -> None:
+    """Record each write-time BLOCK to the audit ledger (a ``write_block`` entry, no git tree).
+
+    Best-effort — the audit write must NEVER downgrade a real block, so the WHOLE body is guarded
+    (this call sits outside ``run``'s own fail-open try/except; an exception here would otherwise
+    crash before the BLOCKED message + exit 2). Evidence uses the check_duplicate verdict's real
+    keys (``existing_signature`` / ``existing_qualified_name``); language from the edited path.
+    """
+    try:
+        from cartogate.stats import record_block
+
+        fp = file_path_of(payload)
+        language = language_of(fp) if isinstance(fp, str) else None
+        lang_value = language.value if language is not None else "?"
+        for verdict in blocked:
+            record_block(
+                repo, kind="write",
+                signature=str(verdict.get("existing_signature") or ""),
+                language=lang_value,
+                existing=str(verdict.get("existing_qualified_name") or ""),
+            )
+    except Exception:  # noqa: BLE001 — never let audit recording break the block path.
+        return
+
+
 def run(payload: dict[str, object], *, env: dict[str, str], cwd: Path) -> int:
     """Resolve the repo from the payload, run the gate, and return the hook exit code.
 
@@ -172,6 +199,7 @@ def run(payload: dict[str, object], *, env: dict[str, str], cwd: Path) -> int:
 
     if not blocked:
         return EXIT_OK
+    _record_write_blocks(payload, blocked, repo)  # audit trail; best-effort, never affects exit
     for verdict in blocked:
         # The full BLOCKED/EVIDENCE/ACTION/anti-loop message: the shape measured to convert a
         # block into self-correction instead of an identical-retry loop.

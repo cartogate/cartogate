@@ -40,6 +40,20 @@ def test_find_duplicate_ignores_methods(make_symbol: MakeSymbol) -> None:
     assert find_duplicate_signatures([a, b]) == {}
 
 
+def test_find_duplicate_ignores_module_main_entrypoints(make_symbol: MakeSymbol) -> None:
+    # FIELD EVIDENCE (2026-07-17, this repo's own gate): every CLI module defines the
+    # idiomatic `main(argv)` entry point — 16 of them predate this test. Per-module `main`
+    # is a convention like unrelated `__init__`s, not reuse-able duplication; without this
+    # exemption the gate blocks EVERY new CLI module (gate-fatigue law).
+    a = make_symbol("pkg.audit_cli.main", signature="def main(argv):")
+    b = make_symbol("pkg.task_cli.main", signature="def main(argv):")
+    assert find_duplicate_signatures([a, b]) == {}
+    # ...and the exemption is name-exact: near-mains still count as duplicates.
+    c = make_symbol("pkg.x.mainloop", signature="def mainloop(argv):")
+    d = make_symbol("pkg.y.mainloop", signature="def mainloop(argv):")
+    assert find_duplicate_signatures([c, d]) != {}
+
+
 def test_gate_proposed_source_blocks_existing(make_symbol: MakeSymbol) -> None:
     store = InMemoryStore()
     store.upsert_unit("m.py", [make_symbol("pkg.foo", signature="def foo(x):")], [])

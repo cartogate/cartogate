@@ -50,8 +50,10 @@ def test_preexisting_duplicates_do_not_block_an_unrelated_change(
     err = capsys.readouterr().err
     assert "BLOCKED" not in err
     assert "pre-existing" in err  # ...but the debt is surfaced, quietly
-    # A passing diff-aware run still stamps (bypass observability).
-    assert (tmp_path / ".cartogate" / "gate_runs.jsonl").exists()
+    # A passing diff-aware run still stamps a commit_pass in the ledger (bypass observability).
+    from cartogate.audit import ledger
+
+    assert any(e["type"] == "commit_pass" for e in ledger.read(tmp_path))
 
 
 def test_newly_added_duplicate_still_blocks(

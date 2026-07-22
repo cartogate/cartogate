@@ -10,19 +10,23 @@ from __future__ import annotations
 import sys
 
 _USAGE = (
-    "usage: cartogate {init,daemon,index,hooks,doctor,stats,viz,impact,localize,cfg,slice} ..."
-    " (--version)\n\n"
+    "usage: cartogate {init,daemon,index,hooks,doctor,stats,audit,task,viz,impact,localize,cfg,"
+    "slice,nav,navmap} ... (--version)\n\n"
     "  init      set up Cartogate here (MCP + daemon); --agent <tool> adds rules + commit gate\n"
     "  daemon    manage the warm gate daemon (start|stop|status)\n"
     "  index     build/refresh the resolved graph snapshot (fast cold starts; F-09)\n"
     "  hooks     install git hooks that refresh the snapshot on commit/merge/checkout\n"
     "  doctor    check Cartogate is healthy: daemon, live gate probe, hook wiring\n"
     "  stats     what Cartogate knows about this repo + duplicates it has prevented\n"
+    "  audit     verify / inspect the tamper-evident gate-decision ledger\n"
+    "  task      declare/attest/status/close the active verification contract\n"
     "  viz       export the code graph (GraphML / JSON / interactive HTML)\n"
     "  impact    PR-time impact summary from a git diff (affected code + tests + docs)\n"
     "  localize  rank likely culprits behind a failing test from a git diff\n"
     "  cfg       control-flow analysis: statement-level unreachable code (Py/JS/TS/Go/Java/C)\n"
     "  slice     program slice: statements affecting (or affected by) a line (Py/JS/TS/Go/Java/C)\n"
+    "  nav       deterministic UI navigation: check flows / capture states (needs [nav] extra)\n"
+    "  navmap    export a DRAFT navigation map seeded from extracted routes\n"
 )
 
 
@@ -76,6 +80,22 @@ def main(argv: list[str] | None = None) -> int:
         from cartogate.stats import main as stats_main
 
         return stats_main(args[1:])
+    if args[0] == "audit":
+        from cartogate.audit_cli import main as audit_main
+
+        return audit_main(args[1:])
+    if args[0] == "task":
+        from cartogate.task_cli import main as task_main
+
+        return task_main(args[1:])
+    if args[0] == "nav":
+        from cartogate.nav_cli import main as nav_main
+
+        return nav_main(args[1:])
+    if args[0] == "navmap":
+        from cartogate.navmap_cli import main as navmap_main
+
+        return navmap_main(args[1:])
     if args[0] == "daemon":
         from cartogate.daemon.cli import main as daemon_main
 

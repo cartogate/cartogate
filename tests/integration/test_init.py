@@ -49,12 +49,11 @@ def test_init_writes_mcp_rule_and_hook(tmp_path: Path, capsys: pytest.CaptureFix
 
 def test_init_rule_has_set_workspace_and_no_hardcoded_path(tmp_path: Path) -> None:
     _git_init(tmp_path)
-    (tmp_path / ".windsurf").mkdir()
-    run(tmp_path, agents={"windsurf"}, dry_run=False, force=False, run_doctor=False,
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
         start_daemon=False, install_gate=True,
     )
 
-    rule = (tmp_path / ".windsurf" / "rules" / "cartogate.md").read_text(encoding="utf-8")
+    rule = (tmp_path / ".devin" / "rules" / "cartogate.md").read_text(encoding="utf-8")
     assert "set_workspace" in rule  # tells the agent the recovery step
     assert "check_duplicate" in rule  # and keeps the tool-usage nudge
     assert "On a BLOCK:" in rule  # explicit block-recovery rule (GPT-5.x literalism)
@@ -66,26 +65,25 @@ def test_init_rule_has_set_workspace_and_no_hardcoded_path(tmp_path: Path) -> No
 
     # Idempotent: re-running writes nothing new.
     before = rule
-    run(tmp_path, agents={"windsurf"}, dry_run=False, force=False, run_doctor=False,
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
         start_daemon=False, install_gate=True,
     )
-    assert (tmp_path / ".windsurf" / "rules" / "cartogate.md").read_text(encoding="utf-8") == before
+    assert (tmp_path / ".devin" / "rules" / "cartogate.md").read_text(encoding="utf-8") == before
 
 
 def test_rule_files_carry_always_on_frontmatter(tmp_path: Path) -> None:
     """Without frontmatter the editor defaults the rule to MANUAL and it never fires — the rule
     must open with the always-on header (user-reported: the agent kept 'forgetting' the rule)."""
     _git_init(tmp_path)
-    (tmp_path / ".windsurf").mkdir()
     (tmp_path / ".cursor").mkdir()
-    run(tmp_path, agents={"windsurf", "cursor"}, dry_run=False, force=False, run_doctor=False,
+    run(tmp_path, agents={"devin", "cursor"}, dry_run=False, force=False, run_doctor=False,
         start_daemon=False, install_gate=True,
     )
-    ws = (tmp_path / ".windsurf" / "rules" / "cartogate.md").read_text(encoding="utf-8")
-    assert ws.startswith("---\ntrigger: always_on\n---\n")
+    dv = (tmp_path / ".devin" / "rules" / "cartogate.md").read_text(encoding="utf-8")
+    assert dv.startswith("---\ntrigger: always_on\n---\n")
     cur = (tmp_path / ".cursor" / "rules" / "cartogate.mdc").read_text(encoding="utf-8")
     assert cur.startswith("---\n") and "alwaysApply: true" in cur.splitlines()[2]
-    assert "set_workspace" in ws and "set_workspace" in cur  # content intact under the header
+    assert "set_workspace" in dv and "set_workspace" in cur  # content intact under the header
 
 
 def test_old_frontmatterless_rule_is_upgraded(tmp_path: Path) -> None:
@@ -94,21 +92,21 @@ def test_old_frontmatterless_rule_is_upgraded(tmp_path: Path) -> None:
     from cartogate.init_cmd import _rule_text
 
     _git_init(tmp_path)
-    (tmp_path / ".windsurf" / "rules").mkdir(parents=True)
-    (tmp_path / ".windsurf" / "rules" / "cartogate.md").write_text(
+    (tmp_path / ".devin" / "rules").mkdir(parents=True)
+    (tmp_path / ".devin" / "rules" / "cartogate.md").write_text(
         _rule_text(), encoding="utf-8"  # pre-frontmatter era content
     )
-    run(tmp_path, agents={"windsurf"}, dry_run=False, force=False, run_doctor=False,
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
         start_daemon=False, install_gate=True,
     )
-    upgraded = (tmp_path / ".windsurf" / "rules" / "cartogate.md").read_text(encoding="utf-8")
+    upgraded = (tmp_path / ".devin" / "rules" / "cartogate.md").read_text(encoding="utf-8")
     assert upgraded.startswith("---\ntrigger: always_on\n---\n")
     # And idempotent afterwards.
     before = upgraded
-    run(tmp_path, agents={"windsurf"}, dry_run=False, force=False, run_doctor=False,
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
         start_daemon=False, install_gate=True,
     )
-    assert (tmp_path / ".windsurf" / "rules" / "cartogate.md").read_text(
+    assert (tmp_path / ".devin" / "rules" / "cartogate.md").read_text(
         encoding="utf-8") == before
 
 
@@ -136,13 +134,12 @@ def test_init_prints_the_active_surfaces_summary(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _git_init(tmp_path)
-    (tmp_path / ".windsurf").mkdir()
-    run(tmp_path, agents={"windsurf"}, dry_run=False, force=False, run_doctor=False,
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
         start_daemon=False, install_gate=True,
     )
     out = capsys.readouterr().out
     assert "active surfaces:" in out
-    assert "rule (windsurf): .windsurf/rules/cartogate.md (always-on)" in out
+    assert "rule (devin): .devin/rules/cartogate.md (always-on)" in out
     assert "commit gate: installed" in out
     assert "daemon: not running" in out  # start_daemon=False in tests
 
@@ -167,16 +164,16 @@ def test_rule_predating_block_recovery_is_upgraded(tmp_path: Path) -> None:
     from cartogate.init_cmd import _rule_text
 
     _git_init(tmp_path)
-    (tmp_path / ".windsurf" / "rules").mkdir(parents=True)
+    (tmp_path / ".devin" / "rules").mkdir(parents=True)
     # Simulate the pre-overhaul rule text (frontmatter + content, no block-recovery paragraph).
     old_rule = "---\ntrigger: always_on\n---\n\n" + _rule_text().replace(
         "**On a BLOCK:**", "**Old:**"
     )
-    (tmp_path / ".windsurf" / "rules" / "cartogate.md").write_text(old_rule, encoding="utf-8")
-    run(tmp_path, agents={"windsurf"}, dry_run=False, force=False, run_doctor=False,
+    (tmp_path / ".devin" / "rules" / "cartogate.md").write_text(old_rule, encoding="utf-8")
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
         start_daemon=False, install_gate=True,
     )
-    upgraded = (tmp_path / ".windsurf" / "rules" / "cartogate.md").read_text(encoding="utf-8")
+    upgraded = (tmp_path / ".devin" / "rules" / "cartogate.md").read_text(encoding="utf-8")
     assert "On a BLOCK:" in upgraded
 
 
@@ -279,23 +276,6 @@ def test_init_claude_wires_the_write_gate(tmp_path: Path) -> None:
     assert settings.read_text(encoding="utf-8") == before  # idempotent
 
 
-def test_init_windsurf_wires_the_write_gate(tmp_path: Path) -> None:
-    _git_init(tmp_path)
-    (tmp_path / ".windsurf").mkdir()
-    run(tmp_path, agents={"windsurf"}, dry_run=False, force=False, run_doctor=False,
-        start_daemon=False, install_gate=True,
-    )
-    hooks = json.loads((tmp_path / ".windsurf" / "hooks.json").read_text(encoding="utf-8"))
-    entries = hooks["pre_write_code"]
-    assert any("cartogate-write-gate" in json.dumps(e) for e in entries)
-    before = json.dumps(hooks)
-    run(tmp_path, agents={"windsurf"}, dry_run=False, force=False, run_doctor=False,
-        start_daemon=False, install_gate=True,
-    )
-    after = json.loads((tmp_path / ".windsurf" / "hooks.json").read_text(encoding="utf-8"))
-    assert json.dumps(after) == before  # idempotent
-
-
 def test_init_without_agent_does_not_touch_hook_configs(tmp_path: Path) -> None:
     _git_init(tmp_path)
     run(tmp_path, agents={"claude"}, dry_run=False, force=False, run_doctor=False,
@@ -306,13 +286,12 @@ def test_init_without_agent_does_not_touch_hook_configs(tmp_path: Path) -> None:
 
 def test_dry_run_does_not_touch_write_gate_configs(tmp_path: Path) -> None:
     _git_init(tmp_path)
-    (tmp_path / ".windsurf").mkdir()
     (tmp_path / ".claude").mkdir()
-    run(tmp_path, agents={"claude", "windsurf"}, dry_run=True, force=False, run_doctor=False,
+    run(tmp_path, agents={"claude", "devin"}, dry_run=True, force=False, run_doctor=False,
         start_daemon=False, install_gate=True,
     )
     assert not (tmp_path / ".claude" / "settings.json").exists()
-    assert not (tmp_path / ".windsurf" / "hooks.json").exists()
+    assert not (tmp_path / ".devin" / "hooks.v1.json").exists()
 
 
 def test_malformed_hooks_value_is_replaced_with_a_note(
@@ -336,12 +315,11 @@ def test_summary_reports_the_write_gate(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _git_init(tmp_path)
-    (tmp_path / ".windsurf").mkdir()
-    run(tmp_path, agents={"windsurf"}, dry_run=False, force=False, run_doctor=False,
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
         start_daemon=False, install_gate=True,
     )
     out = capsys.readouterr().out
-    assert "write gate (windsurf): installed" in out
+    assert "write gate (devin): installed" in out
 
 
 def test_init_makes_cartogate_dir_self_ignoring(tmp_path: Path) -> None:
@@ -596,3 +574,223 @@ def test_installed_precommit_blocks_a_duplicate(tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert "duplicate" in result.stderr.lower()
+
+
+# Task 1: Devin MCP config target
+def test_init_devin_writes_stdio_mcp_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--agent devin writes .devin/config.json (Devin CLI stdio MCP) and notes the global
+    Devin Desktop MCP path."""
+    _git_init(tmp_path)
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    cfg = json.loads((tmp_path / ".devin" / "config.json").read_text(encoding="utf-8"))
+    assert cfg["mcpServers"]["cartogate"]["command"] == "cartogate-mcp"
+    assert "codeium/windsurf/mcp_config.json" in capsys.readouterr().out  # Desktop global note
+
+
+def test_init_devin_mcp_is_merge_safe_and_idempotent(tmp_path: Path) -> None:
+    _git_init(tmp_path)
+    (tmp_path / ".devin").mkdir()
+    (tmp_path / ".devin" / "config.json").write_text(
+        json.dumps({"mcpServers": {"other": {"command": "x"}}}), encoding="utf-8"
+    )
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    cfg = json.loads((tmp_path / ".devin" / "config.json").read_text(encoding="utf-8"))
+    assert cfg["mcpServers"]["other"]["command"] == "x"  # preserved
+    assert cfg["mcpServers"]["cartogate"]["command"] == "cartogate-mcp"  # added
+    before = (tmp_path / ".devin" / "config.json").read_text(encoding="utf-8")
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    assert (tmp_path / ".devin" / "config.json").read_text(encoding="utf-8") == before
+
+
+# Task 2: Devin Desktop rule nudge
+def test_init_devin_writes_desktop_rule_always_on(tmp_path: Path) -> None:
+    """--agent devin writes the Devin Desktop workspace rule under .devin/rules/, always-on,
+    with the tool-usage + block-recovery content, and no hardcoded path."""
+    _git_init(tmp_path)
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    rule = (tmp_path / ".devin" / "rules" / "cartogate.md").read_text(encoding="utf-8")
+    assert rule.startswith("---\ntrigger: always_on\n---\n")
+    assert "check_duplicate" in rule and "set_workspace" in rule and "On a BLOCK:" in rule
+    assert str(tmp_path.resolve()) not in rule  # committable/shareable
+    # Devin CLI reads AGENTS.md — the shared nudge is present there too.
+    assert "set_workspace" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    # Idempotent.
+    before = rule
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    assert (tmp_path / ".devin" / "rules" / "cartogate.md").read_text(encoding="utf-8") == before
+
+
+# Task 3: Devin CLI write-time gate
+def test_init_devin_wires_the_write_gate_top_level(tmp_path: Path) -> None:
+    """--agent devin installs the Devin CLI PreToolUse write gate into .devin/hooks.v1.json.
+    Standalone hooks.v1.json has the event map at the TOP LEVEL (no `hooks` wrapper key).
+    Merge-safe (existing PreToolUse entries preserved) and idempotent."""
+    _git_init(tmp_path)
+    (tmp_path / ".devin").mkdir()
+    (tmp_path / ".devin" / "hooks.v1.json").write_text(json.dumps({
+        "PreToolUse": [{"matcher": "exec",
+                        "hooks": [{"type": "command", "command": "my-own-hook"}]}]
+    }), encoding="utf-8")
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    data = json.loads((tmp_path / ".devin" / "hooks.v1.json").read_text(encoding="utf-8"))
+    assert "hooks" not in data  # top-level event map, NOT wrapped under a "hooks" key
+    entries = data["PreToolUse"]
+    assert any("my-own-hook" in json.dumps(e) for e in entries)  # merge-safe
+    ours = [e for e in entries if "cartogate-write-gate" in json.dumps(e)]
+    assert len(ours) == 1
+    assert ours[0]["hooks"][0]["type"] == "command"
+    before = (tmp_path / ".devin" / "hooks.v1.json").read_text(encoding="utf-8")
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    after = (tmp_path / ".devin" / "hooks.v1.json").read_text(encoding="utf-8")
+    assert after == before  # idempotent
+
+
+def test_init_devin_dry_run_writes_no_hook(tmp_path: Path) -> None:
+    _git_init(tmp_path)
+    (tmp_path / ".devin").mkdir()
+    run(tmp_path, agents={"devin"}, dry_run=True, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    assert not (tmp_path / ".devin" / "hooks.v1.json").exists()
+
+
+def test_summary_reports_the_devin_write_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _git_init(tmp_path)
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    assert "write gate (devin): installed" in capsys.readouterr().out
+
+
+# Task 4: Expose devin on the CLI
+def test_init_main_agent_devin_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cartogate init --agent devin` via main(): MCP config + Desktop rule + write hook +
+    commit gate, all present."""
+    from cartogate.init_cmd import main
+
+    monkeypatch.setattr("cartogate.daemon.cli.cmd_start", lambda *a, **k: 0)  # never spawn
+    _git_init(tmp_path)
+    main([str(tmp_path), "--agent", "devin", "--no-doctor", "--no-daemon"])
+    assert (tmp_path / ".devin" / "config.json").exists()
+    assert (tmp_path / ".devin" / "rules" / "cartogate.md").exists()
+    assert (tmp_path / ".devin" / "hooks.v1.json").exists()
+    assert (tmp_path / ".git" / "hooks" / "pre-commit").exists()
+    assert "set_workspace" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
+# Task 5: Retire windsurf → deprecated alias, migrate its tests to devin
+def test_agent_windsurf_is_a_deprecated_alias_for_devin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--agent windsurf still works but is deprecated: it behaves exactly like --agent devin
+    (writes .devin/, not .windsurf/) and prints a deprecation note."""
+    from cartogate.init_cmd import main
+
+    monkeypatch.setattr("cartogate.daemon.cli.cmd_start", lambda *a, **k: 0)
+    _git_init(tmp_path)
+    main([str(tmp_path), "--agent", "windsurf", "--no-doctor", "--no-daemon"])
+    out = capsys.readouterr().out
+    assert "deprecated" in out.lower() and "devin" in out
+    # Full parity with --agent devin: rule + MCP config + write-gate all land on the devin surfaces.
+    assert (tmp_path / ".devin" / "rules" / "cartogate.md").exists()  # routed to devin surfaces
+    assert (tmp_path / ".devin" / "config.json").exists()
+    assert (tmp_path / ".devin" / "hooks.v1.json").exists()
+    assert not (tmp_path / ".windsurf" / "rules" / "cartogate.md").exists()  # not the old path
+
+
+def test_detect_agents_maps_devin_and_legacy_windsurf(tmp_path: Path) -> None:
+    assert detect_agents(tmp_path / "a") == set()  # nothing
+    (tmp_path / "d" / ".devin").mkdir(parents=True)
+    assert detect_agents(tmp_path / "d") == {"devin"}
+    (tmp_path / "w" / ".windsurf").mkdir(parents=True)
+    assert detect_agents(tmp_path / "w") == {"devin"}  # legacy dir still maps to devin
+
+
+def test_init_claude_wires_the_stop_gate(tmp_path: Path) -> None:
+    """--agent claude installs the Stop hook into .claude/settings.json,
+    merge-safe (existing hooks preserved) and idempotent."""
+    _git_init(tmp_path)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({
+        "hooks": {"Stop": [
+            {"hooks": [{"type": "command", "command": "my-own-hook"}]}
+        ]},
+        "other": {"keep": True},
+    }), encoding="utf-8")
+    run(tmp_path, agents={"claude"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    entries = data["hooks"]["Stop"]
+    assert any("my-own-hook" in json.dumps(e) for e in entries)  # merge-safe
+    ours = [e for e in entries if "cartogate-stop-gate" in json.dumps(e)]
+    assert len(ours) == 1
+    assert data["other"] == {"keep": True}
+    before = settings.read_text(encoding="utf-8")
+    run(tmp_path, agents={"claude"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    assert settings.read_text(encoding="utf-8") == before  # idempotent
+
+
+def test_init_devin_wires_the_stop_gate_top_level(tmp_path: Path) -> None:
+    """--agent devin installs the Devin CLI Stop hook into .devin/hooks.v1.json.
+    Top-level event map (no `hooks` wrapper key), merge-safe and idempotent."""
+    _git_init(tmp_path)
+    (tmp_path / ".devin").mkdir()
+    (tmp_path / ".devin" / "hooks.v1.json").write_text(json.dumps({
+        "Stop": [{"hooks": [{"type": "command", "command": "my-own-hook"}]}]
+    }), encoding="utf-8")
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    data = json.loads((tmp_path / ".devin" / "hooks.v1.json").read_text(encoding="utf-8"))
+    assert "hooks" not in data  # top-level event map, NOT wrapped under a "hooks" key
+    entries = data["Stop"]
+    assert any("my-own-hook" in json.dumps(e) for e in entries)  # merge-safe
+    ours = [e for e in entries if "cartogate-stop-gate" in json.dumps(e)]
+    assert len(ours) == 1
+    before = (tmp_path / ".devin" / "hooks.v1.json").read_text(encoding="utf-8")
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    after = (tmp_path / ".devin" / "hooks.v1.json").read_text(encoding="utf-8")
+    assert after == before  # idempotent
+
+
+def test_init_stop_gate_dry_run_writes_nothing(tmp_path: Path) -> None:
+    """Dry-run mode does not write stop-gate configurations."""
+    _git_init(tmp_path)
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".devin").mkdir()
+    run(tmp_path, agents={"claude", "devin"}, dry_run=True, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    # Settings should not exist (or if they do from before, Stop entry not added)
+    if (tmp_path / ".claude" / "settings.json").exists():
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert "Stop" not in data.get("hooks", {})
+    if (tmp_path / ".devin" / "hooks.v1.json").exists():
+        data = json.loads((tmp_path / ".devin" / "hooks.v1.json").read_text())
+        assert "Stop" not in data

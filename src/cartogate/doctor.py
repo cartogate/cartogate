@@ -174,13 +174,16 @@ def _check_hooks(repo: Path, report: _Report) -> None:
             "Claude Code PreToolUse gate not wired — run `cartogate init --agent claude`"
         )
 
-    windsurf = repo / ".windsurf" / "hooks.json"
-    windsurf_text = _read(windsurf) if windsurf.exists() else ""
-    if "pre_write_code" in windsurf_text and "cartogate" in windsurf_text:
-        report.ok("Windsurf pre_write_code gate wired (write-time block)")
+    # Devin CLI's write-time gate lives in .devin/hooks.v1.json (top-level PreToolUse). The legacy
+    # .windsurf/hooks.json surface is no longer written (windsurf → devin), so we check the current
+    # one only; the remedy points at the canonical `--agent devin` (never the deprecated alias).
+    devin = repo / ".devin" / "hooks.v1.json"
+    devin_text = _read(devin) if devin.exists() else ""
+    if "cartogate-write-gate" in devin_text:
+        report.ok("Devin CLI PreToolUse gate wired (write-time block)")
     else:
         report.warn(
-            "Windsurf pre_write_code gate not wired — run `cartogate init --agent windsurf`"
+            "Devin CLI PreToolUse gate not wired — run `cartogate init --agent devin`"
         )
 
     from cartogate.stats import gate_coverage

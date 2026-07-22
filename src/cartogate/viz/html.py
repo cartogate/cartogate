@@ -50,6 +50,7 @@ _EDGE_COLORS = {
     "inherits": "#9085e9",
     "implements": "#9085e9",
     "documents": "#c98500",
+    "links_to": "#3aa675",
 }
 _EDGE_DASH = {
     "references": "3 2",

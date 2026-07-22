@@ -1,0 +1,4 @@
+{
+  "name": "nextjs-app-fixture",
+  "dependencies": { "next": "16.0.0" }
+}

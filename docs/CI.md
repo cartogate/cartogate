@@ -131,12 +131,9 @@ pushing.  Install it from https://github.com/nektos/act and run:
 act pull_request --matrix os:ubuntu-latest --matrix python-version:3.11
 ```
 
-> **Note:** `act` was not available in the authoring environment (Windows without
-> Docker Desktop).  The workflow was validated by:
-> 1. Running all gate commands locally and confirming they pass.
-> 2. Confirming the YAML has no tabs (GitHub Actions YAML must use spaces only).
-> 3. Confirming all required top-level keys (`name`, `on`, `jobs`) are present.
-> 4. Auditing action versions (`actions/checkout@v4`, `actions/setup-python@v5`).
+> **Note:** if `act` isn't available locally, validate the workflow by running the gate
+> commands directly and confirming the YAML uses spaces (no tabs), declares the required
+> `name`/`on`/`jobs` keys, and pins its action versions.
 
 ---
 
@@ -147,19 +144,16 @@ act pull_request --matrix os:ubuntu-latest --matrix python-version:3.11
 | `push` | Branch `main` |
 | `pull_request` | Target branch `main` |
 
-The open PR `fix/duplicate-gate-method-false-positives → main` will receive a CI
-check as soon as the workflow file lands on that branch.
-
 ---
 
 ## What is excluded from CI
 
 - **Benchmarks** — deselected via pytest marker.  SLO timing is host-dependent.
-- **`.dev/` directory** — agent-pipeline staging, reports, and trace logs.  Never
-  packaged or deployed.  The `[tool.hatch.build.targets.wheel]` stanza in
-  `pyproject.toml` limits the wheel to `src/cartogate` only.
+- **Non-package files** — docs, tests, and tooling are never packaged or deployed.  The
+  `[tool.hatch.build.targets.wheel]` stanza in `pyproject.toml` limits the wheel to
+  `src/cartogate` only.
 - **Deployment** — there is no deployment target in v0.  The MCP server ships as a
-  pip-installable package; publishing to PyPI is a future concern (see `FUTURE.md`).
+  pip-installable package; publishing to PyPI is a future concern.
 
 ---
 

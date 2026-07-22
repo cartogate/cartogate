@@ -1,13 +1,58 @@
-"""Shared test fixtures."""
+"""Shared test fixtures and helpers."""
 
 from __future__ import annotations
 
+import json
+import subprocess
 from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from cartogate.schema.enums import Confidence, NodeKind, Provenance, Visibility
 from cartogate.schema.nodes import Location, Node
+
+
+def git_cmd(repo: Path, *args: str) -> None:
+    """Run a git command in ``repo`` — the ONE shared helper for git-backed tests.
+
+    Consolidation target (gate field evidence 2026-07-17): 18 test files had grown their own
+    identical ``_git`` copies; new tests import this instead of adding a 19th.
+    """
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def free_port() -> int:
+    """An OS-assigned free TCP port (E2E servers; collision-proof across runs)."""
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def write_file(repo: Path, rel: str, body: str) -> None:
+    """Write ``body`` at ``repo/rel``, creating parents — the ONE shared helper
+    (the gate refused a second ``_write`` copy, 2026-07-20)."""
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def init_git_repo(repo: Path) -> None:
+    """``git init`` + a throwaway committer identity, so commits work on any machine."""
+    git_cmd(repo, "init", "-q")
+    git_cmd(repo, "config", "user.email", "t@t")
+    git_cmd(repo, "config", "user.name", "T")
+
+
+def write_contract(repo: Path, data: dict[str, Any]) -> Path:
+    """Write a contract JSON file for `cartogate task declare` tests — the ONE shared copy
+    (the duplicate gate blocked the second one, 2026-07-18)."""
+    p = repo / "contract.json"
+    p.write_text(json.dumps(data), encoding="utf-8")
+    return p
 
 MakeSymbol = Callable[..., Node]
 

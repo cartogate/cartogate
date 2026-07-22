@@ -20,7 +20,7 @@ pipx install "git+https://github.com/cartogate/cartogate.git@stable"
 cd your-repo
 cartogate init                    # advisory setup: MCP config + a warm background daemon
 cartogate init --agent cursor     # full adoption: always-on rule + write-time and commit gates
-                                  # (agents: claude | cursor | windsurf | vscode | codex)
+                                  # (agents: claude | cursor | devin | vscode | codex)
 ```
 
 `init` is idempotent and merge-safe. The default is non-invasive — it writes nothing into your
@@ -156,7 +156,7 @@ Precision is the load-bearing property: Cartogate never reports a wrong referenc
 <!-- VALUE:END -->
 
 These results cover two repositories plus Cartogate's own source; broader corpora and further
-trials are tracked on the [roadmap](./docs/dev/ROADMAP.md).
+trials are ongoing.
 
 ## CLI reference
 
@@ -170,6 +170,7 @@ cartogate index     build/refresh the persistent graph snapshot
 cartogate hooks     install git hooks that refresh the snapshot on commit/merge/checkout
 cartogate doctor    health check: daemon, live gate probe, hook wiring
 cartogate stats     what Cartogate knows about this repo + blocks it has issued
+cartogate audit     verify / inspect the tamper-evident gate-decision ledger; see docs/AUDIT.md
 cartogate viz       export the graph (GraphML / JSON / interactive HTML) to .cartogate/viz
 cartogate impact    PR-time impact summary from a git diff
 cartogate localize  rank likely culprits behind a failing test
@@ -188,8 +189,14 @@ cartogate slice     program slice for a file:line
 
 ## Documentation
 
-- [`docs/INTEGRATIONS.md`](./docs/INTEGRATIONS.md) — per-editor setup: Windsurf, Cursor, VS Code,
+- [`docs/INTEGRATIONS.md`](./docs/INTEGRATIONS.md) — per-editor setup: Devin, Cursor, VS Code,
   Claude Code, Codex.
+- [`docs/CONTRACTS.md`](./docs/CONTRACTS.md) — verification contracts: a declared definition
+  of done the commit gate enforces (exit-0 checks + tree-pinned human attestations).
+- [`docs/AUDIT.md`](./docs/AUDIT.md) — the tamper-evident audit ledger: what it proves, its
+  honest bounds, and `cartogate audit verify`.
+- [`docs/NAV.md`](./docs/NAV.md) — navigation maps: deterministic UI navigation for agents, the
+  extract→seed→crawl→check loop, bounded frontier discovery, and the driver adapters.
 - [`evaluation/`](./evaluation/) — the value study, benchmarks, and reproduction harnesses.
 - [`docs/RELEASING.md`](./docs/RELEASING.md) and [`docs/CI.md`](./docs/CI.md) — release
   procedure and the CI pipeline.

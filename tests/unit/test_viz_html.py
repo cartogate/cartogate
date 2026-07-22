@@ -855,7 +855,7 @@ def test_r11_trust_package(make_symbol: MakeSymbol) -> None:
     """R11 PR1 (final round): search answers for the whole corpus, the detail card is
     direction-aware with no silent truncation, and the input layer respects intent
     (drag is not dismissal, Esc peels one layer, focused controls own their keys,
-    resize keeps the viewpoint). Spec: .dev/R11-SPEC.md AC-1..AC-12."""
+    resize keeps the viewpoint)."""
     html = to_html(
         [make_symbol("a.f", unit="r/src/a.py"), make_symbol("b.g", unit="r/src/b.py")],
         [_edge("a.f", "b.g")],

@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "app": "cartogate-viz",
+  "comment": "Round-2 hard task: 4-hop flow across fragment-distinguished view states PLUS a drill-down into the 'tests' family group. The drill is reached by clicking an UNLABELED SVG family circle (css affordance) — a vanilla agent cannot find it; the map makes it deterministic. Honest to the real viz (probed 2026-07-21): drilling a multi-subpackage family sets #v=families&d=subring.<f>, the Structure radio stays checked, and a back button appears.",
+  "states": [
+    {
+      "id": "viz.structure",
+      "url": "/viz.html#v=families",
+      "landmarks": [{"role": "radio", "name": "Structure", "checked": true}],
+      "affordances": [
+        {"ref": "to_globe", "role": "radio", "name": "Globe", "css": "input[name=\"view\"][value=\"globe\"]"},
+        {"ref": "to_deps", "role": "radio", "name": "Dependency", "css": "input[name=\"view\"][value=\"dependency\"]"},
+        {"ref": "drill_tests", "css": "#famlayer circle.fam[data-f=\"2\"]"}
+      ]
+    },
+    {
+      "id": "viz.globe",
+      "url": "/viz.html#v=globe",
+      "landmarks": [{"role": "radio", "name": "Globe", "checked": true}],
+      "affordances": [
+        {"ref": "to_structure", "role": "radio", "name": "Structure", "css": "input[name=\"view\"][value=\"families\"]"}
+      ]
+    },
+    {
+      "id": "viz.deps",
+      "url": "/viz.html#v=dependency",
+      "landmarks": [{"role": "radio", "name": "Dependency", "checked": true}],
+      "affordances": [
+        {"ref": "to_structure", "role": "radio", "name": "Structure", "css": "input[name=\"view\"][value=\"families\"]"}
+      ]
+    },
+    {
+      "id": "viz.drill_tests",
+      "url": "/viz.html#v=families&d=subring.2",
+      "landmarks": [{"role": "radio", "name": "Structure", "checked": true}],
+      "affordances": []
+    }
+  ],
+  "transitions": [
+    {"from": "viz.structure", "do": {"click": "to_globe"}, "to": "viz.globe"},
+    {"from": "viz.globe", "do": {"click": "to_structure"}, "to": "viz.structure"},
+    {"from": "viz.structure", "do": {"click": "to_deps"}, "to": "viz.deps"},
+    {"from": "viz.deps", "do": {"click": "to_structure"}, "to": "viz.structure"},
+    {"from": "viz.structure", "do": {"click": "drill_tests"}, "to": "viz.drill_tests"}
+  ],
+  "flows": [
+    {"name": "tour", "path": ["viz.structure", "viz.globe", "viz.deps", "viz.structure", "viz.drill_tests"]}
+  ]
+}

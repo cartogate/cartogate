@@ -43,3 +43,9 @@ Thumbs.db
 
 # Playwright MCP session artifacts (screenshots/snapshots from visual verification)
 .playwright-mcp/
+
+# Devin CLI personal override (keys/secrets) — never commit
+.devin/config.local.json
+
+# nav A/B experiment artifacts (workspaces, agent env, results)
+experiments/nav-ab/out/

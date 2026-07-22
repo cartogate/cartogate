@@ -52,6 +52,12 @@ Issues = "https://github.com/cartogate/cartogate/issues"
 # Kept (empty) so existing `pip install cartogate[extract]` / `[mcp]` invocations don't error.
 extract = []
 mcp = []
+# Navigation maps (cartogate.nav) use Playwright for live browser automation. The module imports
+# playwright only inside functions (lazy), so cartogate works without it. Users who want to use
+# `cartogate nav` or PlaywrightDriver need to install the [nav] extra.
+nav = ["playwright>=1.49"]
+# Second driver adapter — ships to prove the Driver seam honest (design spec §3b).
+nav-selenium = ["selenium>=4.27"]
 # The live agent A/B study (Layer 2 of the value harness) talks to the Claude API. Kept
 # out of the default/dev install: the deterministic value suite (Layer 1) needs nothing here.
 evaluation = [
@@ -80,13 +86,16 @@ cartogate = "cartogate.cli:main"
 # canonical command still works.
 carto = "cartogate.cli:main"
 # The write-time gate (PreToolUse / pre_write_code): one command, auto-detecting payload
-# shape, wired by `cartogate init --agent claude|windsurf`.
+# shape, wired by `cartogate init --agent claude|devin`.
 cartogate-write-gate = "cartogate.writegate:main"
 # The commit gate as a console script: PATH-resolved from the pipx venv, so the git hook
 # never depends on which `python` is first on PATH (field bug, 2026-07-04).
 cartogate-precommit = "cartogate.precommit:main"
 # The grep-nudge PreToolUse advisory hook: watches grep/rg calls and nudges on symbol patterns.
 cartogate-grep-nudge = "cartogate.grepnudge:main"
+# The stop-gate session-end hook: bounded refusal for locked, unsatisfied contracts (spec §4),
+# wired by `cartogate init --agent claude|devin` into the harness Stop hook.
+cartogate-stop-gate = "cartogate.stopgate:main"
 
 # Git-derived version (declared dynamic above): tags (v0.1.0) set the release base and every
 # commit past a tag gets a dev suffix + the short hash. The fallback covers building from a
@@ -126,7 +135,7 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["psutil.*", "networkx.*", "jedi.*", "tree_sitter_python.*"]
+module = ["psutil.*", "networkx.*", "jedi.*", "tree_sitter_python.*", "playwright.*", "selenium.*"]
 ignore_missing_imports = true
 
 # The MCP low-level SDK exposes untyped decorators (list_tools/call_tool); relax only the
@@ -147,11 +156,12 @@ pythonpath = ["."]
 # -m benchmark / -m value respectively.
 # The value-study fixtures contain test_*.py files that are *sample code to analyze*, not
 # tests to run — keep pytest from collecting them.
-addopts = "-ra -m 'not benchmark and not value' --ignore=tests/value/fixtures"
+addopts = "-ra -m 'not benchmark and not value and not e2e' --ignore=tests/value/fixtures"
 markers = [
     "benchmark: worst-case-scale SLO benchmarks (Section 5); deselect with -m 'not benchmark'",
     "integration: cross-component integration tests",
     "value: developer-value study (docs/VALUE_STUDY.md); deselect with -m 'not value'",
+    "e2e: live-browser nav loop (needs [nav]/[nav-selenium] + browsers); CI runs -m e2e",
 ]
 
 [tool.coverage.run]

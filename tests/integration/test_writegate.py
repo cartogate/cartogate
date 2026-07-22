@@ -1,6 +1,6 @@
 """F-13 — the write-time gate as a FIRST-CLASS packaged surface (`cartogate.writegate`).
 
-The research (docs/dev/STRATEGY.md law 2) says hooks are the only deterministic enforcement
+The research says hooks are the only deterministic enforcement
 layer, so the adapter graduates from a repo-local script to an installed module + console
 script that `cartogate init --agent <tool>` can wire into any repo: one command
 (`cartogate-write-gate`), auto-detecting Claude's ``tool_input`` and Windsurf's ``tool_info``

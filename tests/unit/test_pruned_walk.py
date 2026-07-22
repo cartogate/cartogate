@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cartogate.extract.pipeline import iter_files
+from cartogate.extract.walk import iter_files
 
 
 def test_walk_prunes_excluded_trees_instead_of_filtering(tmp_path: Path) -> None:

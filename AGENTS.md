@@ -34,3 +34,12 @@ structural facts.
 
 Every block traces to a line of source. Anything uncertain or inferred is advisory and can never
 block — so a refusal is always something you can point at in the code.
+
+
+## Workspace (do this first)
+
+Some editors (e.g. Windsurf) don't pass the open project to the MCP server, so Cartogate starts without knowing which repository you're in. On your FIRST Cartogate call of a session, include the `workspace_root` parameter (every Cartogate tool accepts it) set to the absolute path of THIS repository's root (the workspace folder open in your editor) — the call configures the workspace and runs in one step. If a tool ever returns `"action": "set_workspace"`, call `set_workspace` with `root` = that same path, then retry.
+
+**On a BLOCK:** follow the ACTION line in the block message (usually: reuse the existing
+symbol it names). Never retry the identical call, never rename the new symbol to evade
+the gate, and never bypass with `--no-verify`.

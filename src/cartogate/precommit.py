@@ -674,6 +674,369 @@ def _print_reference_advisory(repo: Path) -> None:
         return
 
 
+def _enforce_contract(repo: Path) -> int:
+    """Verification-contract enforcement (spec §6). 0 = no contract / satisfied; 1 = BLOCK.
+
+    Runs only after the duplicate gate has passed. Fail-CLOSED on a corrupt contract or an
+    enforcement error — the contract is self-declared and amendable, so a block is always
+    actionable (fix the code, redeclare, or `cartogate task close --abandon` — all ledgered).
+    """
+    try:
+        import hashlib
+
+        from cartogate.audit import ledger
+        from cartogate.contract import state
+        from cartogate.contract import verify as cverify
+        from cartogate.contract.schema import contract_hash
+
+        try:
+            contract = state.load(repo)
+        except Exception as exc:  # noqa: BLE001 — corrupt active contract must block, not skip
+            print(
+                f"CONTRACT BLOCKED: active contract unreadable ({exc}).\n"
+                "ACTION: redeclare it (`cartogate task declare <file>`) or close it "
+                "(`cartogate task close --abandon`).",
+                file=sys.stderr,
+            )
+            return 1
+        if contract is None:
+            return 0
+        # Anchor the worker-writable task.json to its hash-chained ledger declaration
+        # (review Critical, PR A): a hand-edited contract or lock must never silently pass.
+        divergence = cverify.state_divergence(repo, contract)
+        if divergence is not None:
+            ledger.append(repo, entry_type="state_divergence", tree=None,
+                          evidence={"reason": divergence})
+            print(
+                f"CONTRACT BLOCKED: {divergence} — the live contract state is not anchored "
+                "to its ledger declaration (tampered or incomplete).\n"
+                "ACTION: redeclare the contract (`cartogate task declare <file>`) or close it "
+                "(`cartogate task close --abandon`) — both are ledgered.",
+                file=sys.stderr,
+            )
+            return 1
+        status = cverify.evaluate(contract, repo)
+        if status.diverged:
+            print(
+                "contract note: working directory diverges from the index — checks read the "
+                "worktree (stage everything for exact evidence)", file=sys.stderr,
+            )
+        if contract.scope_files:
+            # An ADVISORY: its own try/except so no failure here can ever flip a passing
+            # contract into a block (review Critical, PR C) — same discipline as every other
+            # advisory in this file.
+            try:
+                import fnmatch
+
+                listing = run_git(
+                    ["diff", "--cached", "--no-renames", "--name-only"],
+                    cwd=repo, timeout=_ADVISORY_GIT_TIMEOUT_S,
+                )
+                if listing is not None:
+                    staged = listing.decode("utf-8", "replace").split()
+                    # fnmatchcase: git always emits POSIX forward-slash paths; plain fnmatch
+                    # normcases per-OS (case-folding + separator flips on Windows), making the
+                    # verdict host-dependent (review M4).
+                    outside = sorted(
+                        p for p in staged
+                        if not any(fnmatch.fnmatchcase(p, g) for g in contract.scope_files)
+                    )
+                    if outside:
+                        # Ledger BEFORE printing — a print failure must never drop evidence.
+                        ledger.append(
+                            repo, entry_type="scope_deviation", tree=status.tree,
+                            evidence={"contract_hash": contract_hash(contract.raw),
+                                      "files": outside},
+                        )
+                        shown = ", ".join(
+                            x.encode("utf-8", "replace").decode("utf-8") for x in outside[:5]
+                        )
+                        print(
+                            f"SCOPE ADVISORY: {len(outside)} staged file(s) outside the "
+                            f"declared scope: {shown} — advisory only, never blocking (v1).",
+                            file=sys.stderr,
+                        )
+            except Exception:  # noqa: BLE001 — an advisory must never break the commit gate.
+                pass
+        evidence = {
+            "contract_hash": contract_hash(contract.raw),
+            "checks": [
+                # errors="replace": the OSError spawn path can carry surrogate-escaped bytes;
+                # a strict encode would crash past the ledger append (review Medium, PR B).
+                {"run": r.run, "exit": r.exit_code,
+                 "output_hash": hashlib.blake2b(
+                     r.output.encode("utf-8", errors="replace")).hexdigest()}
+                for r in status.checks
+            ],
+            "attest": dict(status.attest),
+            "diverged": status.diverged,
+        }
+        if status.ok:
+            ledger.append(repo, entry_type="contract_pass", tree=status.tree, evidence=evidence)
+            return 0
+        # Ledger the decision BEFORE printing the diagnosis: a print failure (strict-encoding
+        # stream vs exotic check output) must never drop the evidence — every path is ledgered.
+        ledger.append(repo, entry_type="contract_fail", tree=status.tree, evidence=evidence)
+        print(
+            f"CONTRACT BLOCKED: the declared definition of done for {contract.task!r} "
+            "is not met.", file=sys.stderr,
+        )
+        for result in status.checks:
+            if result.exit_code != 0:
+                print(f"  CHECK FAILED (exit {result.exit_code}): {result.run}", file=sys.stderr)
+                for line in result.output.strip().splitlines()[-10:]:
+                    # Sanitize: surrogate-escaped bytes in check output must degrade, not raise.
+                    print(f"    {line.encode('utf-8', 'replace').decode('utf-8')}",
+                          file=sys.stderr)
+        for name, ok in status.attest.items():
+            if not ok:
+                print(
+                    f"  ATTESTATION PENDING: {name} — run `cartogate task attest {name}` "
+                    "after staging", file=sys.stderr,
+                )
+        print(
+            "ACTION: make the declared checks pass (this is YOUR definition of done), or "
+            "amend the contract (`cartogate task declare`), or close it "
+            "(`cartogate task close --abandon`) — every path is ledgered, none is silent.",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 — enforcement itself failing must fail CLOSED
+        print(f"CONTRACT BLOCKED: enforcement could not run ({exc}); refusing.", file=sys.stderr)
+        return 1
+
+
+_NEXT_CONFIG_MARKERS = (
+    "next.config.js", "next.config.ts", "next.config.mjs", "next.config.cjs",
+)
+
+
+def _next_evidence_at(prefix: str, tracked: set[str], repo: Path) -> bool:
+    """NEXT evidence for the project dir ``prefix`` (advisory-side, index blobs).
+
+    A tracked next.config.*, or a tracked package.json whose INDEX content
+    depends on "next" — mere package.json presence corroborates nothing
+    (corpus round 2: components dirs named pages/ minted phantom routes).
+    """
+    import json
+
+    joined = f"{prefix}/" if prefix else ""
+    if any(f"{joined}{cfg}" in tracked for cfg in _NEXT_CONFIG_MARKERS):
+        return True
+    pkg_path = f"{joined}package.json"
+    if pkg_path not in tracked:
+        return False
+    blob = run_git(["show", f":{pkg_path}"], cwd=repo, timeout=_ADVISORY_GIT_TIMEOUT_S)
+    if blob is None:
+        return False
+    try:
+        data = json.loads(blob.decode("utf-8", "replace"))
+    except ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    return any(
+        isinstance(data.get(section), dict) and "next" in data[section]
+        for section in ("dependencies", "devDependencies")
+    )
+
+
+def _nextjs_pattern_for_repo_path(
+    rel_posix: str, tracked: set[str], repo: Path
+) -> str | None:
+    """Best-effort Next.js url pattern for a repo-relative file path.
+
+    The route tree may be nested (``web/app/items/page.tsx``) — slice from the
+    first ``app``/``pages`` segment that yields a pattern, but ONLY when the
+    segment's parent is corroborated as a framework root (repo root, or a
+    tracked package.json/next.config sibling). Without corroboration a
+    coincidental ``docs/app/page.tsx`` would read as route ``/`` (review
+    Medium: filename-coincidence false positive — the gate-fatigue law says
+    silence beats a wrong advisory).
+    """
+    from cartogate.extract.routes_js import _nextjs_pattern
+
+    parts = tuple(rel_posix.split("/"))
+    for i, seg in enumerate(parts):
+        if seg not in ("app", "pages"):
+            continue
+        base_parts = parts[:i]
+        if base_parts and base_parts[-1] == "src":
+            base_parts = base_parts[:-1]  # standard src/ layout at ANY depth
+        project_prefix = "/".join(base_parts)
+        corroborated = _next_evidence_at(project_prefix, tracked, repo)
+        if not corroborated:
+            continue
+        pattern = _nextjs_pattern(parts[i:])
+        if pattern is not None:
+            return pattern
+    return None
+
+
+def _checked_in_navmap_states(repo: Path) -> list[tuple[str, str, str]]:
+    """``(map_path, state_id, url)`` for every state of every tracked ``*navmap*.json``.
+
+    Minimal local reader on purpose: the gate path must not import
+    ``cartogate.nav`` (isolation law), and an advisory only needs the urls.
+    Malformed or non-navmap files are silently skipped.
+    """
+    import json
+
+    listing = run_git(
+        ["ls-files", "--cached", "--", "*navmap*.json"],
+        cwd=repo, timeout=_ADVISORY_GIT_TIMEOUT_S,
+    )
+    if listing is None:
+        return []
+    out: list[tuple[str, str, str]] = []
+    for map_path in listing.decode("utf-8", "replace").split():
+        blob = run_git(["show", f":{map_path}"], cwd=repo, timeout=_ADVISORY_GIT_TIMEOUT_S)
+        if blob is None:
+            continue
+        try:
+            data = json.loads(blob.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if not isinstance(data, dict) or data.get("version") != 1:
+            continue
+        states = data.get("states")
+        if not isinstance(states, list):
+            continue
+        for state in states:
+            if (
+                isinstance(state, dict)
+                and isinstance(state.get("id"), str)
+                and isinstance(state.get("url"), str)
+            ):
+                out.append((map_path, state["id"], state["url"]))
+    return out
+
+
+def _print_navmap_drift_advisory(repo: Path) -> None:
+    """The freshness wire (nav Stage 2B): a staged change that removes or renames a
+    route pattern REFERENCED by a checked-in navigation map gets an advisory naming
+    the pattern, its source, and the referencing map state. Additions and
+    unreferenced churn are silent (noise discipline). Advisory-only: never raises,
+    never affects the exit code. Model-based testing died of hand-maintained-model
+    drift; this is the wire that prevents it.
+
+    Cost: one ls-files up front (mapless repos exit in ~ms — review Medium:
+    a 150-file commit paid 5.5s before the reorder), then O(changed route
+    files) git-show calls + tree-sitter parses only when a map exists.
+    """
+    try:
+        from cartogate.extract.routes_js import (
+            _PARSER,
+            _ROUTER_IMPORT_RE,
+            _router_path_declarations,
+        )
+
+        # Cheap precondition FIRST: no checked-in map, no possible advisory.
+        map_states = _checked_in_navmap_states(repo)
+        if not map_states:
+            return
+
+        listing = run_git(
+            ["diff", "--cached", "-M", "--name-status"],
+            cwd=repo, timeout=_ADVISORY_GIT_TIMEOUT_S,
+        )
+        if listing is None:
+            return
+        tracked_listing = run_git(
+            ["ls-files", "--cached"], cwd=repo, timeout=_ADVISORY_GIT_TIMEOUT_S
+        )
+        tracked = (
+            set(tracked_listing.decode("utf-8", "replace").split())
+            if tracked_listing is not None
+            else set()
+        )
+        route_suffixes = (".tsx", ".jsx", ".ts", ".js")
+        removed: list[tuple[str, str]] = []  # (pattern, evidence phrase)
+        for line in listing.decode("utf-8", "replace").splitlines():
+            parts = line.split("\t")
+            status = parts[0]
+            old_path: str
+            new_path: str | None
+            if status.startswith("R") and len(parts) == 3:
+                old_path, new_path = parts[1], parts[2]
+            elif len(parts) == 2 and status[0] in ("D", "M"):
+                old_path = parts[1]
+                new_path = None if status[0] == "D" else parts[1]
+            else:
+                continue
+            if not old_path.endswith(route_suffixes):
+                continue
+
+            # Path-derived (Next.js): the pattern IS the path; D/R changes it.
+            if status[0] in ("D", "R"):
+                old_pat = _nextjs_pattern_for_repo_path(old_path, tracked, repo)
+                new_pat = (
+                    _nextjs_pattern_for_repo_path(new_path, tracked, repo)
+                    if new_path is not None
+                    else None
+                )
+                if old_pat is not None and old_pat != new_pat:
+                    verb = "deleted" if status[0] == "D" else "renamed"
+                    removed.append((old_pat, f"{verb} {old_path}"))
+
+            # Content-derived (React Router / Vue Router literals): HEAD blob vs staged blob.
+            head_blob = run_git(
+                ["show", f"HEAD:{old_path}"], cwd=repo, timeout=_ADVISORY_GIT_TIMEOUT_S
+            )
+            if head_blob is None or not _ROUTER_IMPORT_RE.search(
+                head_blob.decode("utf-8", "replace")
+            ):
+                continue
+            old_pats = {
+                p for p, _ in _router_path_declarations(_PARSER.parse(head_blob), head_blob)
+            }
+            new_pats: set[str] = set()
+            if new_path is not None:
+                staged_blob = run_git(
+                    ["show", f":{new_path}"], cwd=repo, timeout=_ADVISORY_GIT_TIMEOUT_S
+                )
+                if staged_blob is not None:
+                    new_pats = {
+                        p
+                        for p, _ in _router_path_declarations(
+                            _PARSER.parse(staged_blob), staged_blob
+                        )
+                    }
+            for pat in sorted(old_pats - new_pats):
+                removed.append((pat, f"{old_path} no longer declares it"))
+
+        if not removed:
+            return
+        hits: list[tuple[str, str, str, str]] = []
+        for map_path, state_id, url in map_states:
+            url_path = url.split("#")[0]
+            for pat, evidence in removed:
+                if url_path == pat:
+                    hits.append((pat, evidence, map_path, state_id))
+        if not hits:
+            return
+        affected = len({pat for pat, _, _, _ in hits})
+        print(
+            f"NAVMAP DRIFT ADVISORY: this commit removes/renames {affected} route(s) "
+            "referenced by a checked-in navigation map.",
+            file=sys.stderr,
+        )
+        for pat, evidence, map_path, state_id in hits:
+            print(
+                f"  EVIDENCE (EXTRACTED): route '{pat}' ({evidence}) is referenced by "
+                f"{map_path} state '{state_id}'",
+                file=sys.stderr,
+            )
+        print(
+            "ACTION: update the map (or re-run `cartogate navmap` and re-fill "
+            "landmarks) — navigation checks must not chase a route the app no "
+            "longer serves.",
+            file=sys.stderr,
+        )
+    except Exception:  # noqa: BLE001 — an advisory must never break the commit gate.
+        return
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     repo = Path(args[0]).resolve() if args else Path.cwd()
@@ -689,6 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
     _print_test_integrity_advisory(repo)  # ditto — the reward-hacking counter
     _print_cycle_advisory(repo)  # ditto — architecture erosion, diff-aware
     _print_deletion_advisory(repo)  # ditto — deletions that still have references
+    _print_navmap_drift_advisory(repo)  # ditto — the map is told when the app moves
     if duplicates:
         # Judge THE CHANGE, not the history: only duplicates the staged diff introduces block;
         # pre-existing ones are debt to surface, not a reason to refuse an unrelated commit.
@@ -705,6 +1069,8 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
     if not duplicates:
+        if _enforce_contract(repo) != 0:
+            return 1
         from cartogate.stats import record_gate_pass
 
         record_gate_pass(repo)  # bypass observability: stamp the tree this gate verified

@@ -1,6 +1,6 @@
 """Cartogate: local-first, CPG-shaped typed code knowledge graph + deterministic gate engine.
 
-See README.md for scope and docs/dev/ROADMAP.md for the roadmap.
+See README.md for scope.
 """
 
 #: The installed distribution's version — derived from git at build time (hatch-vcs), so every

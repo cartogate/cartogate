@@ -1,10 +1,11 @@
 """Bypass observability (STRATEGY.md Phase 1) — commits that dodged the gate become visible.
 
 Agents demonstrably bypass out-of-session gates (documented ``--no-verify`` evasion). We can't
-prevent the flag, but we can make it observable: a PASSING pre-commit run stamps the staged
-tree hash (``git write-tree``) into ``.cartogate/gate_runs.jsonl``; ``cartogate stats`` then
-reports any recent commit whose tree carries no stamp — a bypass, or a commit made without
-the gate. Deterministic: tree-hash equality, no heuristics.
+prevent the flag, but we can make it observable: a PASSING pre-commit run records the staged
+tree hash (``git write-tree``) as a ``commit_pass`` entry in the audit ledger
+(``.cartogate/ledger.jsonl``); ``cartogate stats`` then reports any recent commit whose tree
+carries no stamp — a bypass, or a commit made without the gate. Deterministic: tree-hash
+equality, no heuristics.
 """
 
 from __future__ import annotations
@@ -31,12 +32,14 @@ def _git(repo: Path, *args: str) -> None:
 
 
 def test_passing_gate_stamps_the_staged_tree(tmp_path: Path) -> None:
+    from cartogate.audit import ledger
+
     _git(tmp_path, "init", "-q")
     (tmp_path / "a.py").write_text("def f(x):\n    return x\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     assert precommit_main([str(tmp_path)]) == 0
-    stamps = (tmp_path / ".cartogate" / "gate_runs.jsonl").read_text(encoding="utf-8")
-    assert '"tree"' in stamps
+    entries = ledger.read(tmp_path)
+    assert any(e["type"] == "commit_pass" and e["tree"] for e in entries)
 
 
 def test_coverage_separates_verified_from_bypassed(tmp_path: Path) -> None:
@@ -62,7 +65,12 @@ def test_blocked_run_does_not_stamp(tmp_path: Path) -> None:
     (tmp_path / "m2.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     assert precommit_main([str(tmp_path)]) == 1  # duplicate -> blocked
-    assert not (tmp_path / ".cartogate" / "gate_runs.jsonl").exists()
+    from cartogate.audit import ledger
+
+    # A block records a commit_block entry but NO commit_pass — so it never counts as coverage.
+    entries = ledger.read(tmp_path)
+    assert all(e["type"] != "commit_pass" for e in entries)
+    assert any(e["type"] == "commit_block" for e in entries)
 
 
 def test_stats_reports_the_coverage(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

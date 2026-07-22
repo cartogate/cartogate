@@ -11,9 +11,9 @@ per-tool rule file + AGENTS.md) and install the hard gates: **commit-time** (C,
 never touches repo files or hooks.
 
 Everything is idempotent and ``--dry-run`` previews without writing. ``--agent claude`` /
-``--agent windsurf`` also wire the WRITE-TIME gate (C2): the installed ``cartogate-write-gate``
-command goes into ``.claude/settings.json`` (PreToolUse) / ``.windsurf/hooks.json``
-(pre_write_code) — the only enforcement layer that acts inside the agent's loop (F-13).
+``--agent devin`` also wire the WRITE-TIME gate (C2): the installed ``cartogate-write-gate``
+command goes into ``.claude/settings.json`` (PreToolUse) / ``.devin/hooks.v1.json``
+(top-level PreToolUse) — the only enforcement layer that acts inside the agent's loop (F-13).
 """
 
 from __future__ import annotations
@@ -77,7 +77,8 @@ def _workspace_section() -> str:
     hardcoded absolute path, so the rule is committable/shareable and correct on any clone)."""
     return (
         "\n## Workspace (do this first)\n\n"
-        "Some editors (e.g. Windsurf) don't pass the open project to the MCP server, so Cartogate "
+        "Some editors (e.g. Devin Desktop) don't pass the open project to the MCP server, so "
+        "Cartogate "
         "starts without knowing which repository you're in. On your FIRST Cartogate call of a "
         "session, include the `workspace_root` parameter (every Cartogate tool accepts it) set to "
         "the absolute path of THIS repository's root (the workspace folder open in your editor) — "
@@ -138,8 +139,8 @@ def detect_agents(root: Path) -> set[str]:
         found.add("claude")
     if (root / ".cursor").exists():
         found.add("cursor")
-    if (root / ".windsurf").exists():
-        found.add("windsurf")
+    if (root / ".devin").exists() or (root / ".windsurf").exists():
+        found.add("devin")  # Devin Desktop/CLI; legacy .windsurf/ maps here too
     if (root / ".vscode").exists():
         found.add("vscode")
     if (root / ".codex").exists():
@@ -265,13 +266,39 @@ def _append_agents_md(root: Path, report: _Report) -> None:
 
 WRITE_GATE_COMMAND = "cartogate-write-gate"
 GREP_NUDGE_COMMAND = "cartogate-grep-nudge"
+STOP_GATE_COMMAND = "cartogate-stop-gate"
+
+#: Devin CLI's file-edit tool names (regex on the PreToolUse event's tool_name). Devin's exact
+#: built-in tool names aren't published; this superset covers the common agent conventions. The
+#: write gate FAILS OPEN on an unrecognized payload and the git pre-commit hook is the
+#: fail-closed backstop, so a matcher miss degrades safely to commit-time enforcement. VERIFY
+#: against a live Devin session and tighten to the real names.
+_DEVIN_EDIT_MATCHER = (
+    "Write|Edit|MultiEdit|str_replace|create_file|edit_file|write_file|apply_patch"
+)
 
 
-def _install_write_hook_claude(root: Path, report: _Report) -> None:
-    """Wire the write gate into ``.claude/settings.json`` (PreToolUse) — merge-safe, idempotent.
+def _pretooluse_entries(entries: object, matcher: str, command: str) -> list[object] | None:
+    """The shared find-or-append for a ``{matcher, hooks:[{type, command}]}`` PreToolUse entry.
 
-    Existing hooks are preserved; ours is appended only if no PreToolUse entry already invokes
-    the write-gate command.
+    Returns the updated entry list, or ``None`` when ``command`` is already wired (the caller
+    skips). Merge-safe by construction: existing entries are preserved, ours is appended.
+    (Task #39 — three installers had grown identical copies of this shape.)
+    """
+    out = list(entries) if isinstance(entries, list) else []
+    if any(command in json.dumps(e) for e in out):
+        return None
+    out.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
+    return out
+
+
+def _install_hook_claude(
+    root: Path, report: _Report, *, matcher: str, command: str, label: str
+) -> None:
+    """Wire a PreToolUse command into ``.claude/settings.json`` — merge-safe, idempotent.
+
+    Claude nests the event map under a ``hooks`` key; a malformed (non-object) value is
+    announced before being replaced. Existing hooks are preserved.
     """
     rel = ".claude/settings.json"
     path = root / rel
@@ -283,29 +310,71 @@ def _install_write_hook_claude(root: Path, report: _Report) -> None:
                 f"{rel} 'hooks' was not an object ({type(hooks).__name__}) — replacing"
             )
         hooks = {}
-    entries = hooks.get("PreToolUse")
-    if not isinstance(entries, list):
-        entries = []
-    if any(WRITE_GATE_COMMAND in json.dumps(e) for e in entries):
-        report.skip(f"{rel} already wires the write gate")
+    entries = _pretooluse_entries(hooks.get("PreToolUse"), matcher, command)
+    if entries is None:
+        report.skip(f"{rel} already wires the {label}")
         return
-    entries.append(
-        {
-            "matcher": "Write|Edit|MultiEdit",
-            "hooks": [{"type": "command", "command": WRITE_GATE_COMMAND}],
-        }
-    )
     hooks["PreToolUse"] = entries
     data["hooks"] = hooks
+    _write_json(path, data, report)
+    report.did(f"{rel}  (PreToolUse {label} → {command})")
+
+
+def _install_write_hook_claude(root: Path, report: _Report) -> None:
+    """The write-time gate for Claude Code (PreToolUse on file edits)."""
+    _install_hook_claude(
+        root, report, matcher="Write|Edit|MultiEdit",
+        command=WRITE_GATE_COMMAND, label="write gate",
+    )
+
+
+def _install_grep_nudge_claude(root: Path, report: _Report) -> None:
+    """The advisory grep nudge for Claude Code (PreToolUse on Grep)."""
+    _install_hook_claude(
+        root, report, matcher="Grep", command=GREP_NUDGE_COMMAND, label="grep nudge",
+    )
+
+
+def _install_write_hook_devin(root: Path, report: _Report) -> None:
+    """Wire the write gate into ``.devin/hooks.v1.json`` (PreToolUse) — merge-safe, idempotent.
+
+    Devin CLI hooks use the Claude-Code hook format, but the standalone ``.devin/hooks.v1.json``
+    puts the event map at the TOP LEVEL (no ``hooks`` wrapper key). Blocking is exit code 2 — the
+    same contract ``cartogate-write-gate`` already implements.
+    """
+    rel = ".devin/hooks.v1.json"
+    path = root / rel
+    data = _read_json(path)
+    entries = _pretooluse_entries(data.get("PreToolUse"), _DEVIN_EDIT_MATCHER, WRITE_GATE_COMMAND)
+    if entries is None:
+        report.skip(f"{rel} already wires the write gate")
+        return
+    data["PreToolUse"] = entries
     _write_json(path, data, report)
     report.did(f"{rel}  (PreToolUse write gate → {WRITE_GATE_COMMAND})")
 
 
-def _install_grep_nudge_claude(root: Path, report: _Report) -> None:
-    """Wire the grep nudge into ``.claude/settings.json`` (PreToolUse) — merge-safe, idempotent.
+def _stop_entries(entries: object, command: str) -> list[object] | None:
+    """Find or append a matcherless Stop entry invoking ``command``.
 
-    Existing hooks are preserved; ours is appended only if no PreToolUse entry already invokes
-    the grep-nudge command.
+    Copy-then-append semantics (same shape as the PreToolUse installers): ``None`` when
+    ``command`` is already wired (caller skips); else the updated entry list. Stop hooks
+    take no matcher — they fire on every session end.
+    """
+    if not isinstance(entries, list):
+        entries = []
+    if any(command in json.dumps(e) for e in entries):
+        return None  # Already present
+    # Append a matcherless entry (no "matcher" key — the Stop hook doesn't filter by tool)
+    entries.append({"hooks": [{"type": "command", "command": command}]})
+    return entries
+
+
+def _install_stop_hook_claude(root: Path, report: _Report) -> None:
+    """Wire the stop-gate into ``.claude/settings.json`` Stop hook — merge-safe, idempotent.
+
+    The Stop hook fires on session end; ours is appended only if none already invokes the
+    stop-gate command.
     """
     rel = ".claude/settings.json"
     path = root / rel
@@ -317,39 +386,37 @@ def _install_grep_nudge_claude(root: Path, report: _Report) -> None:
                 f"{rel} 'hooks' was not an object ({type(hooks).__name__}) — replacing"
             )
         hooks = {}
-    entries = hooks.get("PreToolUse")
+    entries = hooks.get("Stop")
     if not isinstance(entries, list):
         entries = []
-    if any(GREP_NUDGE_COMMAND in json.dumps(e) for e in entries):
-        report.skip(f"{rel} already wires the grep nudge")
+    new_entries = _stop_entries(entries, STOP_GATE_COMMAND)
+    if new_entries is None:
+        report.skip(f"{rel} already wires the stop-gate")
         return
-    entries.append(
-        {
-            "matcher": "Grep",
-            "hooks": [{"type": "command", "command": GREP_NUDGE_COMMAND}],
-        }
-    )
-    hooks["PreToolUse"] = entries
+    hooks["Stop"] = new_entries
     data["hooks"] = hooks
     _write_json(path, data, report)
-    report.did(f"{rel}  (PreToolUse grep nudge → {GREP_NUDGE_COMMAND})")
+    report.did(f"{rel}  (Stop hook → {STOP_GATE_COMMAND})")
 
 
-def _install_write_hook_windsurf(root: Path, report: _Report) -> None:
-    """Wire the write gate into ``.windsurf/hooks.json`` (pre_write_code) — merge-safe."""
-    rel = ".windsurf/hooks.json"
+def _install_stop_hook_devin(root: Path, report: _Report) -> None:
+    """Wire the stop-gate into ``.devin/hooks.v1.json`` Stop hook — merge-safe, idempotent.
+
+    Devin CLI hooks put the event map at the TOP LEVEL (no ``hooks`` wrapper key).
+    """
+    rel = ".devin/hooks.v1.json"
     path = root / rel
     data = _read_json(path)
-    entries = data.get("pre_write_code")
+    entries = data.get("Stop")
     if not isinstance(entries, list):
         entries = []
-    if any(WRITE_GATE_COMMAND in json.dumps(e) for e in entries):
-        report.skip(f"{rel} already wires the write gate")
+    new_entries = _stop_entries(entries, STOP_GATE_COMMAND)
+    if new_entries is None:
+        report.skip(f"{rel} already wires the stop-gate")
         return
-    entries.append({"command": WRITE_GATE_COMMAND})
-    data["pre_write_code"] = entries
+    data["Stop"] = new_entries
     _write_json(path, data, report)
-    report.did(f"{rel}  (pre_write_code write gate → {WRITE_GATE_COMMAND})")
+    report.did(f"{rel}  (Stop hook → {STOP_GATE_COMMAND})")
 
 
 def _install_precommit(root: Path, force: bool, report: _Report) -> None:
@@ -413,22 +480,24 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-#: Per-agent MCP config: (marker key) -> (relative path, JSON key). Windsurf's MCP config is
-#: global, so it's handled by a printed note, not a written file.
+#: Per-agent MCP config: (marker key) -> (relative path, JSON key). `devin` uniquely has BOTH a
+#: file target (Devin CLI's project .devin/config.json) and a printed note (Devin Desktop's MCP
+#: config is global) — the note is emitted from the run() loop, not this dict.
 _MCP_TARGETS = {
     "claude": (".mcp.json", "mcpServers"),
     "cursor": (".cursor/mcp.json", "mcpServers"),
     "vscode": (".vscode/mcp.json", "servers"),  # VS Code uses `servers`, not `mcpServers`
+    "devin": (".devin/config.json", "mcpServers"),  # Devin CLI: project stdio MCP config
 }
 _RULE_TARGETS = {
     "cursor": ".cursor/rules/cartogate.mdc",
-    "windsurf": ".windsurf/rules/cartogate.md",
+    "devin": ".devin/rules/cartogate.md",  # Devin Desktop workspace rule
 }
 
 #: Frontmatter per rule target. WITHOUT it the editor defaults the rule to MANUAL activation and
 #: it never fires — which silently disabled the whole workspace/tool nudge (user-reported).
 _RULE_FRONTMATTER = {
-    ".windsurf/rules/cartogate.md": "---\ntrigger: always_on\n---\n\n",
+    ".devin/rules/cartogate.md": "---\ntrigger: always_on\n---\n\n",
     ".cursor/rules/cartogate.mdc": (
         "---\ndescription: Cartogate code-graph tools and workspace rule\n"
         "alwaysApply: true\n---\n\n"
@@ -470,10 +539,11 @@ def run(
             _ensure_mcp(repo, rel, key, report)
         if agent == "codex":
             _ensure_mcp_codex(repo, report)  # Codex uses a project .codex/config.toml (TOML)
-        if agent == "windsurf":
+        if agent == "devin":
             report.note(
-                "Windsurf MCP config is global — add cartogate via 'Manage MCP servers' "
-                "(command: cartogate-mcp). See docs/INTEGRATIONS.md."
+                "Devin Desktop MCP config is global — add cartogate to "
+                "~/.codeium/windsurf/mcp_config.json (command: cartogate-mcp). "
+                "See docs/INTEGRATIONS.md."
             )
 
     # B + C. The opinionated surfaces — rule nudge (repo files) + the blocking commit gate — only
@@ -489,8 +559,10 @@ def run(
         if "claude" in agents:
             _install_write_hook_claude(repo, report)
             _install_grep_nudge_claude(repo, report)
-        if "windsurf" in agents:
-            _install_write_hook_windsurf(repo, report)
+            _install_stop_hook_claude(repo, report)
+        if "devin" in agents:
+            _install_write_hook_devin(repo, report)
+            _install_stop_hook_devin(repo, report)
         if "codex" in agents:
             report.note(
                 "Codex has no pre-write hook surface — the commit-time gate above is the "
@@ -499,7 +571,7 @@ def run(
     else:
         report.note(
             "advisory setup (MCP + daemon) — no rules written, no commit gate. Re-run with "
-            "--agent <tool> (e.g. --agent windsurf) to add the rule nudge + the commit gate."
+            "--agent <tool> (e.g. --agent devin) to add the rule nudge + the commit gate."
         )
 
     # D. Warm daemon — so the first set_workspace / tool call lands on a warm shared graph.
@@ -553,7 +625,7 @@ def _print_surfaces_summary(repo: Path, agents: set[str]) -> None:
             print(f"  rule ({agent}): {rel} (NO always-on frontmatter — re-run init to upgrade)")
     write_hook_files = {
         "claude": ".claude/settings.json",
-        "windsurf": ".windsurf/hooks.json",
+        "devin": ".devin/hooks.v1.json",
     }
     for agent in sorted(agents & write_hook_files.keys()):
         rel = write_hook_files[agent]
@@ -581,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--agent",
         action="append",
-        choices=["claude", "cursor", "windsurf", "vscode", "codex", "all"],
+        choices=["claude", "cursor", "windsurf", "devin", "vscode", "codex", "all"],
         help="adopt a specific tool (repeatable): writes its rule nudge + the commit gate. Without "
         "it, init is advisory (MCP + daemon only) for the auto-detected tools.",
     )
@@ -591,8 +663,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-daemon", action="store_true", help="don't start the warm daemon")
     ns = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
+    if ns.agent and "windsurf" in ns.agent:
+        print(
+            "note: --agent windsurf is deprecated; use --agent devin "
+            "(Windsurf is now Devin Desktop)"
+        )
+        ns.agent = ["devin" if a == "windsurf" else a for a in ns.agent]
+
     root = Path(ns.root)
-    all_agents = {"claude", "cursor", "windsurf", "vscode", "codex"}
+    all_agents = {"claude", "cursor", "devin", "vscode", "codex"}
     # Explicitly naming a tool (`--agent`) opts into the opinionated surfaces (rules + commit gate);
     # without it, init is advisory (MCP + daemon) for the auto-detected tools.
     install_gate = bool(ns.agent)

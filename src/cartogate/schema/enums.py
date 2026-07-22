@@ -47,6 +47,7 @@ class NodeKind(StrEnum):
     TEST = "test"
     EXTERNAL_PACKAGE = "external_package"
     API_ENDPOINT = "api_endpoint"
+    ROUTE = "route"  # framework UI route declaration (Stage 2B — nav freshness)
 
 
 class EdgeType(StrEnum):
@@ -73,6 +74,7 @@ class EdgeType(StrEnum):
     TESTS = "tests"
     DOCUMENTS = "documents"
     EXPOSES = "exposes"
+    LINKS_TO = "links_to"  # route -> route via literal href/to (advisory; never gates)
     # --- cross-repo (Phase 3) ---
     CONSUMES = "consumes"
     # --- advisory semantic ---

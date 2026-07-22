@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "app": "cartogate-viz",
+  "states": [
+    {
+      "id": "viz.families",
+      "url": "/viz.html#v=families",
+      "landmarks": [
+        {
+          "role": "radio",
+          "name": "Structure",
+          "checked": true
+        }
+      ],
+      "affordances": [
+        {
+          "ref": "globe_radio",
+          "role": "radio",
+          "name": "Globe",
+          "css": "input[name=\"view\"][value=\"globe\"]",
+          "provenance": "declared"
+        }
+      ],
+      "provenance": "declared"
+    },
+    {
+      "id": "viz.globe",
+      "url": "/viz.html#v=globe",
+      "landmarks": [
+        {
+          "role": "radio",
+          "name": "Globe",
+          "checked": true
+        }
+      ],
+      "affordances": [
+        {
+          "ref": "families_radio",
+          "role": "radio",
+          "name": "Structure",
+          "css": "input[name=\"view\"][value=\"families\"]",
+          "provenance": "declared"
+        }
+      ],
+      "provenance": "declared"
+    }
+  ],
+  "transitions": [
+    {
+      "from": "viz.families",
+      "do": {"click": "globe_radio"},
+      "to": "viz.globe"
+    },
+    {
+      "from": "viz.globe",
+      "do": {"click": "families_radio"},
+      "to": "viz.families"
+    }
+  ],
+  "flows": [
+    {
+      "name": "tour",
+      "path": ["viz.families", "viz.globe", "viz.families"]
+    }
+  ]
+}
