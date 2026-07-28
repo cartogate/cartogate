@@ -10,9 +10,9 @@ agent supports:
 
 | Surface | What it gives you | Works with |
 |---|---|---|
-| **A. MCP server** | The 13 deterministic tools (`check_duplicate`, `blast_radius`, …) the agent can call while it works | Any MCP-capable agent |
+| **A. MCP server** | The 17 deterministic tools (`check_duplicate`, `blast_radius`, …) the agent can call while it works | Any MCP-capable agent |
 | **B. Rule nudge** | A short always-on instruction telling the agent *when* to call the tools | Any agent that reads a rules/instructions file |
-| **C. Hard gate** | A real BLOCK that refuses a duplicate/contract break — at write-time and/or commit-time | Claude Code / Codex / Devin CLI (write-time) · **every** agent (commit-time) |
+| **C. Hard gate** | A real BLOCK that refuses a duplicate/contract break — at write-time and/or commit-time | Claude Code / Codex / Devin CLI / Devin Desktop, both agents (write-time) · **every** agent (commit-time) |
 
 A good setup is **A + B + C**: the agent can query the graph (A), knows when to (B), and is
 backstopped by a gate it can't skip (C).
@@ -33,7 +33,7 @@ backstopped by a gate it can't skip (C).
 
 ## A. The MCP server (shared by every agent)
 
-One local stdio process serves all 13 tools. It finds the project through a **resolution
+One local stdio process serves all 17 tools. It finds the project through a **resolution
 ladder**, so nothing is hardcoded and multiple open projects each get their own graph:
 
 1. an explicit pin (`cartogate-mcp <path>` or `CARTOGATE_REPO`) — optional;
@@ -93,16 +93,15 @@ instead, give the **absolute path** to the binary (e.g.
 
 ## B + C, per agent
 
-Cartogate ships **`AGENTS.md`** (the emerging cross-agent standard — Codex, Cursor, Amp, Jules, …
-read it), and `cartogate init --agent <tool>` writes the equivalent rule file where your agent
-expects it — **`CLAUDE.md`** (Claude Code), **`.devin/rules/cartogate.md`** (Devin Desktop), and
-others. Copy/adapt the wording into whatever file your agent expects.
+Cartogate already ships rule files for the common conventions: **`CLAUDE.md`** (Claude Code),
+**`AGENTS.md`** (the emerging cross-agent standard — Codex, Cursor, Amp, Jules, … read it), and
+**`.devin/rules/cartogate.md`** (Devin Desktop). Copy/adapt the wording into whatever file your
+agent expects.
 
 ### Claude Code  *(A + B + C — the fullest integration)*
 - **MCP:** `claude mcp add cartogate -- cartogate-mcp` (or a project `.mcp.json` with the
   `mcpServers` block above; the server auto-detects the repo).
-- **Rule nudge:** `cartogate init --agent claude` writes `CLAUDE.md`, which Claude Code reads
-  automatically.
+- **Rule nudge:** `CLAUDE.md` (already in this repo). Claude Code reads it automatically.
 - **Hard gate (write-time):** `cartogate init --agent claude` wires it for you — a merge-safe
   `PreToolUse` entry in `.claude/settings.json` running the installed `cartogate-write-gate`
   command, so an edit that introduces a duplicate is blocked (exit 2) *before* it's written.
@@ -156,13 +155,42 @@ git backstop that fires no matter what Devin's agent chooses to call.
   event map at the top level — no `hooks` wrapper.)
 - **Hard gate (commit-time):** the git pre-commit hook (universal backstop).
 
-**Devin Desktop (formerly Windsurf)** — *A + B + C*
-- **MCP:** global `~/.codeium/windsurf/mcp_config.json` (unchanged by the rename; stdio
-  supported) — add cartogate there (init prints the reminder).
-- **Rule nudge:** `.devin/rules/cartogate.md` (`trigger: always_on`), written by init. The
-  legacy `.windsurf/rules/` path still works as a fallback.
-- **Hard gate:** Devin Desktop exposes no third-party pre-write hooks, so the **git pre-commit
-  hook is the enforcement layer** here.
+**Devin Desktop (formerly Windsurf)** — *A + B + C + write-time gate*
+
+Devin Desktop hosts **two agents**, picked in the chat side panel: **Devin** (aka Devin Local,
+the successor harness it shares with Devin CLI) and the legacy **Cascade** (retired from the
+mainline build mid-2026, but still shipping in some hardened/long-term-support builds). Both
+read their config from
+the `.devin/` namespace, and — contrary to older guidance — **both expose blocking hooks**.
+`cartogate init --agent devin` wires every surface for both.
+
+- **MCP:** the config is global, not per-project. The official docs cite two paths —
+  `~/.codeium/windsurf/mcp_config.json` and `~/.codeium/mcp_config.json` — so add cartogate
+  (`command: cartogate-mcp`) to whichever exists in your build; init prints the reminder.
+  stdio, Streamable HTTP, and SSE are all supported, with per-tool enable toggles and a
+  **100-tool ceiling** across all your MCP servers (Cartogate uses 16).
+- **Rule nudge:** `.devin/rules/cartogate.md` (`trigger: always_on`), written by init —
+  `.devin/rules/` takes precedence over the legacy `.windsurf/rules/` fallback. A root
+  `AGENTS.md` (also written by init) is additionally picked up as an always-on rule.
+- **Hard gate (write-time):** exit code 2 blocks in both agents, so `cartogate-write-gate` is
+  wired into each format:
+  - **Devin agent** — `.devin/hooks.v1.json` (`PreToolUse`, top-level event map) plus a `Stop`
+    entry for the termination gate. The matcher is **empty on purpose** (every tool): Devin's
+    file-edit tool names aren't published, and a matcher that guesses wrong yields a gate that
+    looks installed but never fires. The gate decides from the payload instead — no proposed
+    source means exit 0, on a fast path that costs only interpreter startup.
+  - **Cascade agent** — `.devin/hooks.json` (Cascade schema: the event map nests under
+    `"hooks"`, entries carry `command` + `powershell` + `show_output`), keyed on
+    `pre_write_code`. Cascade nests proposed code in an `edits` array, which the gate
+    understands. Cascade has no blocking session-end event, so its `post_cascade_response`
+    hook is advisory only.
+- **Hook instrumentation (temporary):** because the published hook locations lag the product,
+  init also drops silent firing-log probes in `.devin/config.json`, `.windsurf/hooks.json`, and
+  the unused lifecycle events. Each logs one line to `.cartogate/hooklog.jsonl`; run
+  **`cartogate hooks status`** after a session to see which surfaces your build actually fires
+  and which tool names each agent uses. Probes that stay silent will be pruned in a later
+  release.
+- **Hard gate (commit-time):** the git pre-commit hook, as always, is the fail-closed backstop.
 
 > `--agent windsurf` still works as a deprecated alias for `--agent devin`.
 
@@ -203,7 +231,7 @@ project instructions, and install the git pre-commit hook as the backstop.
 
 ---
 
-## What the agent gets (the 13 tools)
+## What the agent gets (the 17 tools)
 
 `check_duplicate` is the only tool that can **BLOCK**; the rest are **advisory** (they never
 block). See [`AGENTS.md`](../AGENTS.md) for the ready-to-use rule wording and the

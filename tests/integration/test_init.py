@@ -794,3 +794,158 @@ def test_init_stop_gate_dry_run_writes_nothing(tmp_path: Path) -> None:
     if (tmp_path / ".devin" / "hooks.v1.json").exists():
         data = json.loads((tmp_path / ".devin" / "hooks.v1.json").read_text())
         assert "Stop" not in data
+
+
+# Devin Desktop hook instrumentation (PR A): shotgun-install hook entries across every
+# plausible location/format, each logging to .cartogate/hooklog.jsonl, so the user can
+# empirically determine which surfaces their Devin Desktop build reads (both agents live
+# in the .devin/ namespace per user's build; public docs still cite .windsurf/ — cover both).
+def test_init_devin_installs_cascade_schema_hook_files(tmp_path: Path) -> None:
+    """--agent devin writes Cascade-schema hook files at BOTH .devin/hooks.json and
+    .windsurf/hooks.json: pre_write_code runs the write gate (blocking, visible), the
+    post_*/pre_user_prompt events run the firing logger. Windows needs the `powershell`
+    variant on every entry."""
+    _git_init(tmp_path)
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    for rel in (".devin/hooks.json", ".windsurf/hooks.json"):
+        data = json.loads((tmp_path / rel).read_text(encoding="utf-8"))
+        hooks = data["hooks"]  # Cascade schema wraps the event map under "hooks"
+        gate = hooks["pre_write_code"][0]
+        assert gate["command"] == "cartogate-write-gate"
+        assert gate["powershell"] == "cartogate-write-gate"
+        assert gate["show_output"] is True  # the user should SEE blocks
+        for event in ("post_write_code", "post_run_command", "post_mcp_tool_use",
+                      "pre_user_prompt"):
+            entry = hooks[event][0]
+            assert entry["command"] == f"cartogate-hook log --source {rel}:{event}"
+            assert entry["powershell"] == entry["command"]
+            assert entry["show_output"] is False  # silent instrumentation
+        # Cascade's session-end analogue can't block, so the stop-gate runs advisory + visible.
+        stop = hooks["post_cascade_response"][0]
+        assert stop["command"] == "cartogate-stop-gate --advisory"
+        assert stop["show_output"] is True
+
+
+def test_init_devin_cascade_hook_files_merge_safe_and_idempotent(tmp_path: Path) -> None:
+    _git_init(tmp_path)
+    (tmp_path / ".devin").mkdir()
+    (tmp_path / ".devin" / "hooks.json").write_text(json.dumps({
+        "hooks": {"pre_write_code": [{"command": "my-own-hook"}]}
+    }), encoding="utf-8")
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    data = json.loads((tmp_path / ".devin" / "hooks.json").read_text(encoding="utf-8"))
+    cmds = [e.get("command") for e in data["hooks"]["pre_write_code"]]
+    assert "my-own-hook" in cmds and "cartogate-write-gate" in cmds  # merge-safe
+    before = (tmp_path / ".devin" / "hooks.json").read_text(encoding="utf-8")
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    assert (tmp_path / ".devin" / "hooks.json").read_text(encoding="utf-8") == before
+
+
+def test_init_devin_instruments_hooks_v1_with_log_entries(tmp_path: Path) -> None:
+    """.devin/hooks.v1.json (Devin schema) gains firing-log probes alongside the gates: a
+    catch-all PreToolUse logger (empty matcher = all tools — how we learn Devin's real edit
+    tool names, task #38), PostToolUse, UserPromptSubmit, SessionStart, and a Stop logger
+    next to the stop-gate."""
+    _git_init(tmp_path)
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    data = json.loads((tmp_path / ".devin" / "hooks.v1.json").read_text(encoding="utf-8"))
+    pre = data["PreToolUse"]
+    assert any("cartogate-write-gate" in json.dumps(e) for e in pre)  # gate still wired
+    catch_all = [e for e in pre if e.get("matcher") == "" and "cartogate-hook" in json.dumps(e)]
+    assert len(catch_all) == 1
+    for event in ("PostToolUse", "UserPromptSubmit", "SessionStart"):
+        assert any("cartogate-hook log --source" in json.dumps(e) for e in data[event]), event
+    stop = data["Stop"]
+    assert any("cartogate-stop-gate" in json.dumps(e) for e in stop)
+    assert any("cartogate-hook" in json.dumps(e) for e in stop)
+
+
+def test_init_devin_write_gate_uses_a_catch_all_matcher(tmp_path: Path) -> None:
+    """Devin's file-edit tool names are unpublished, so a name-matcher is a guess — and a miss
+    means the gate never fires (an inert gate). The write gate therefore matches ALL tools and
+    decides from the payload: no proposed source -> fail open (see test_writegate.py)."""
+    _git_init(tmp_path)
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    data = json.loads((tmp_path / ".devin" / "hooks.v1.json").read_text(encoding="utf-8"))
+    gate = [e for e in data["PreToolUse"] if "cartogate-write-gate" in json.dumps(e)]
+    assert len(gate) == 1
+    assert gate[0]["matcher"] == ""  # catch-all: no tool-name guessing
+
+
+def test_init_devin_probes_config_json_hooks_key(tmp_path: Path) -> None:
+    """.devin/config.json is a documented alternate hooks location (Devin schema under a
+    "hooks" key) — probe it with log-only entries while preserving the MCP config."""
+    _git_init(tmp_path)
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    cfg = json.loads((tmp_path / ".devin" / "config.json").read_text(encoding="utf-8"))
+    assert cfg["mcpServers"]["cartogate"]["command"] == "cartogate-mcp"  # untouched
+    hooks = cfg["hooks"]
+    assert any("cartogate-hook log --source .devin/config.json:SessionStart" in json.dumps(e)
+               for e in hooks["SessionStart"])
+    assert not any("cartogate-write-gate" in json.dumps(e)
+                   for e in hooks.get("PreToolUse", []))  # log-only probe, never a second gate
+
+
+def test_init_devin_summary_points_at_hooks_status(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _git_init(tmp_path)
+    run(tmp_path, agents={"devin"}, dry_run=False, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    assert "cartogate hooks status" in capsys.readouterr().out
+
+
+def test_init_devin_hook_instrumentation_respects_dry_run(tmp_path: Path) -> None:
+    _git_init(tmp_path)
+    run(tmp_path, agents={"devin"}, dry_run=True, force=False, run_doctor=False,
+        start_daemon=False, install_gate=True,
+    )
+    assert not (tmp_path / ".devin" / "hooks.json").exists()
+    assert not (tmp_path / ".windsurf").exists()
+
+
+class TestRuleTeachesTheV07Surface:
+    """PR C — v0.7.0 shipped contracts + the audit ledger, but the always-on rule still taught
+    only the v0.6 tools, so a correctly-wired agent still saw nothing new. The rule is the
+    cheapest lever we have: it is injected into every single message."""
+
+    def test_rule_teaches_contract_status(self) -> None:
+        from cartogate.init_cmd import _rule_text
+
+        text = _rule_text()
+        assert "contract_status" in text
+        assert "locked" in text.lower()
+
+    def test_rule_teaches_gate_history(self) -> None:
+        from cartogate.init_cmd import _rule_text
+
+        assert "gate_history" in _rule_text()
+
+    def test_rule_forbids_editing_the_contract_to_fit_the_work(self) -> None:
+        """The failure mode a definition-of-done mechanism invites: move the goalposts."""
+        from cartogate.init_cmd import _rule_text
+
+        text = _rule_text().lower()
+        assert "do not edit the contract" in text
+        assert "--no-verify" in text
+
+    def test_rule_omits_nav(self) -> None:
+        """nav is CLI-only — it has no MCP tool, so an agent cannot act on it. Teaching it in
+        the always-on rule would spend context on something unreachable. Delete this test when
+        a nav MCP tool ships."""
+        from cartogate.mcp.tools import TOOL_SPECS
+
+        assert not [s for s in TOOL_SPECS if s["name"].startswith("nav")]

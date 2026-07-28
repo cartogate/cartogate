@@ -1,4 +1,13 @@
-"""``cartogate hooks install|uninstall`` — keep the persistent snapshot fresh automatically (F-09).
+"""``cartogate hooks install|uninstall|status`` — git refresh hooks + the hook-firing report.
+
+``install``/``uninstall`` manage the snapshot-refresh git hooks (below). ``status`` is the
+reader for the Devin Desktop hook instrumentation: it cross-references every installed
+cartogate hook entry (all agent hook config files) against ``.cartogate/hooklog.jsonl`` — the
+firing log ``cartogate-hook`` appends to — so the user can see empirically which of the
+shotgun-installed surfaces their agent build actually reads, and which tool names each agent
+dialect uses (the evidence that lets us tighten the write-gate matcher).
+
+``cartogate hooks install|uninstall`` — keep the persistent snapshot fresh automatically (F-09).
 
 The snapshot only helps if it reflects the current code, and asking a developer to remember to
 re-run ``cartogate index`` is poor DX. This installs git hooks that refresh it at the natural change
@@ -16,6 +25,7 @@ that's safe, just briefly wasteful — acceptable for now, since each refresh is
 
 from __future__ import annotations
 
+import json
 import re
 import stat
 import sys
@@ -106,6 +116,128 @@ def uninstall_hooks(root: Path) -> list[Path]:
     return touched
 
 
+#: Agent hook config files scanned by ``status``, in display order. Devin-schema files nest
+#: entries as ``{event: [{matcher?, hooks: [{command}]}]}``; Cascade-schema files as
+#: ``{"hooks": {event: [{command, powershell?}]}}`` — the scanner handles both shapes.
+_HOOK_CONFIG_FILES = (
+    ".devin/hooks.v1.json",
+    ".devin/hooks.json",
+    ".devin/config.json",
+    ".windsurf/hooks.json",
+    ".claude/settings.json",
+)
+
+
+def _installed_entries(root: Path) -> list[tuple[str, str]]:
+    """Every cartogate-invoking hook entry, as ``(\"<file>:<event>\", command)`` rows."""
+    rows: list[tuple[str, str]] = []
+    for rel in _HOOK_CONFIG_FILES:
+        path = root / rel
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        # hooks.v1.json puts the event map at the top level; the others nest it under "hooks".
+        wrapped = data.get("hooks")
+        event_map = wrapped if isinstance(wrapped, dict) else data
+        for event, entries in sorted(event_map.items()):
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                inner = entry.get("hooks")
+                commands = (
+                    [h.get("command") for h in inner if isinstance(h, dict)]
+                    if isinstance(inner, list)
+                    else [entry.get("command")]
+                )
+                rows.extend(
+                    (f"{rel}:{event}", cmd)
+                    for cmd in commands
+                    if isinstance(cmd, str) and "cartogate" in cmd
+                )
+    return rows
+
+
+def _log_tag_of(command: str) -> str | None:
+    """The ``--source`` tag a ``cartogate-hook log`` command reports under, if it is one."""
+    marker = "cartogate-hook log --source "
+    if marker not in command:
+        return None
+    # A hand-truncated entry can end at the marker — no tag then, not a crash.
+    parts = command.split(marker, 1)[1].split()
+    return parts[0] if parts else None
+
+
+def cmd_hooks_status(root: Path) -> int:
+    """Cross-reference installed hook entries against the ``.cartogate/hooklog.jsonl`` log.
+
+    (Named distinctly from ``daemon.cli.cmd_status`` — same shape, different report.)
+    """
+    from cartogate.hooklog import LOG_REL
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")  # the report uses — / →
+    print(f"cartogate hooks status — {root}\n")
+
+    fired: dict[str, list[dict[str, object]]] = {}
+    tools_by_dialect: dict[str, set[str]] = {}
+    lines = 0
+    log_path = root / LOG_REL
+    try:
+        for raw in log_path.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            lines += 1
+            fired.setdefault(str(rec.get("source")), []).append(rec)
+            tool = rec.get("tool")
+            if isinstance(tool, str):
+                tools_by_dialect.setdefault(str(rec.get("dialect")), set()).add(tool)
+    except OSError:
+        pass
+
+    if lines:
+        print(f"firing log: {LOG_REL} ({lines} lines)")
+    else:
+        print(f"firing log: no hook firings recorded yet ({LOG_REL})")
+
+    rows = _installed_entries(root)
+    print("\ninstalled hook entries:")
+    if not rows:
+        print("  (none — run `cartogate init --agent <tool>` to install them)")
+    for label, command in rows:
+        tag = _log_tag_of(command)
+        if tag is None:
+            verdict = "gate — firing not logged; watch this file's log entries"
+        else:
+            recs = fired.pop(tag, [])
+            if recs:
+                last = max(str(r.get("ts", "")) for r in recs)
+                verdict = f"fired {len(recs)}x, last {last}"
+            else:
+                verdict = "never fired"
+        print(f"  {label}  →  {command}\n      {verdict}")
+
+    if tools_by_dialect:
+        print("\ntool names seen (per dialect — the evidence for tightening matchers):")
+        for dialect, tools in sorted(tools_by_dialect.items()):
+            print(f"  {dialect}: {', '.join(sorted(tools))}")
+
+    stray = {tag: recs for tag, recs in fired.items() if tag not in (None, "None")}
+    if stray:
+        print("\nlog sources with no installed entry (stale/hand-edited configs):")
+        for tag, recs in sorted(stray.items()):
+            print(f"  {tag}: {len(recs)} firings")
+    return 0
+
+
 def cmd_hooks(argv: list[str]) -> int:
     action = argv[0] if argv else ""
     root = Path(argv[1]) if len(argv) > 1 and not argv[1].startswith("-") else Path(".")
@@ -123,10 +255,12 @@ def cmd_hooks(argv: list[str]) -> int:
             if not touched:
                 print("cartogate: no cartogate hooks were installed")
             return 0
+        if action == "status":
+            return cmd_hooks_status(root)
     except RuntimeError as exc:
         print(f"cartogate: {exc}", file=sys.stderr)
         return 1
-    print("usage: cartogate hooks {install|uninstall} [repo]", file=sys.stderr)
+    print("usage: cartogate hooks {install|uninstall|status} [repo]", file=sys.stderr)
     return 2
 
 

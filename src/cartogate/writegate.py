@@ -30,12 +30,10 @@ import os
 import sys
 from pathlib import Path
 
-from cartogate.daemon import client as daemon_client
-from cartogate.extract.languages import language_of, symbol_facts_in
-from cartogate.extract.pipeline import index_package
-from cartogate.schema.enums import Language
-from cartogate.store import InMemoryStore
-from cartogate.surfaces import extract_proposed_text, gate_proposed_source, resolve_repo
+# Imports stay LAZY (inside the functions that need them). The gate is wired with a catch-all
+# matcher — it runs on EVERY tool call and decides from the payload — so a payload carrying no
+# source must exit without paying for the extractor (tree-sitter) or the store. Only json/sys/os
+# and pathlib load on the fast path. Pinned by test_module_import_stays_light.
 
 EXIT_OK = 0
 EXIT_BLOCK = 2  # Claude Code / Codex / Windsurf: exit 2 blocks the tool call.
@@ -64,12 +62,35 @@ def file_path_of(payload: dict[str, object]) -> str | None:
     return file_path if isinstance(file_path, str) else None
 
 
-def normalize(payload: dict[str, object]) -> dict[str, object]:
-    """Map a Windsurf ``pre_write_code`` payload to the Claude-shaped ``{"tool_input": {...}}``.
+def _edits_text(source: dict[str, object]) -> str:
+    """The proposed code from an ``edits`` ARRAY, the shape Devin Desktop's Cascade agent
+    sends on ``pre_write_code`` (``tool_info.edits[] = {old_string, new_string}``).
 
-    Windsurf nests the edit under ``tool_info``; other/older shapes may put the fields at the
-    root. Both are handled. The returned ``tool_input`` uses the ``content``/``file_path`` keys
-    that :func:`evaluate` already understands, so the downstream gate is shared verbatim.
+    Every edit is gated, not just the first — a duplicate introduced by the second edit of a
+    multi-edit write is still a duplicate. Malformed entries are skipped (fail open).
+    """
+    edits = source.get("edits")
+    if not isinstance(edits, list):
+        return ""
+    parts: list[str] = []
+    for edit in edits:
+        if not isinstance(edit, dict):
+            continue
+        for key in _WINDSURF_CODE_KEYS:
+            value = edit.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value)
+                break
+    return "\n".join(parts)
+
+
+def normalize(payload: dict[str, object]) -> dict[str, object]:
+    """Map a Windsurf/Cascade ``pre_write_code`` payload to Claude's ``{"tool_input": {...}}``.
+
+    The edit lives under ``tool_info`` (older/non-standard shapes put it at the root; both are
+    handled), carried EITHER as a flat code key or — Devin Desktop's Cascade agent — as an
+    ``edits`` array. The returned ``tool_input`` uses the ``content``/``file_path`` keys that
+    :func:`evaluate` already understands, so the downstream gate is shared verbatim.
     """
     info = payload.get("tool_info")
     source = info if isinstance(info, dict) else payload
@@ -79,6 +100,10 @@ def normalize(payload: dict[str, object]) -> dict[str, object]:
         if isinstance(value, str) and value.strip():
             tool_input["content"] = value
             break
+    else:  # no flat code key — try the edits-array shape
+        text = _edits_text(source)
+        if text:
+            tool_input["content"] = text
     for key in _WINDSURF_PATH_KEYS:
         value = source.get(key)
         if isinstance(value, str):
@@ -93,6 +118,13 @@ def evaluate(payload: dict[str, object], repo: Path, repo_id: str) -> list[dict[
     Prefers a running warm daemon (instant); falls back to an in-process resolution-free index
     when none is reachable.
     """
+    from cartogate.daemon import client as daemon_client
+    from cartogate.extract.languages import language_of, symbol_facts_in
+    from cartogate.extract.pipeline import index_package
+    from cartogate.schema.enums import Language
+    from cartogate.store import InMemoryStore
+    from cartogate.surfaces import extract_proposed_text, gate_proposed_source
+
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         return []
@@ -165,6 +197,7 @@ def _record_write_blocks(
     keys (``existing_signature`` / ``existing_qualified_name``); language from the edited path.
     """
     try:
+        from cartogate.extract.languages import language_of
         from cartogate.stats import record_block
 
         fp = file_path_of(payload)
@@ -188,6 +221,8 @@ def run(payload: dict[str, object], *, env: dict[str, str], cwd: Path) -> int:
     infrastructure error.
     """
     try:
+        from cartogate.surfaces import resolve_repo
+
         repo, repo_id = resolve_repo(file_path_of(payload), env=env, cwd=cwd)
         blocked = evaluate(payload, repo, repo_id)
     except Exception as exc:  # noqa: BLE001
@@ -216,9 +251,17 @@ def main() -> int:
     if not isinstance(payload, dict):
         return EXIT_OK
     if not isinstance(payload.get("tool_input"), dict):
-        # Windsurf's tool_info-nested payload, or a non-standard shape — normalize to the Claude
-        # form (Claude's Write/Edit/MultiEdit always carry a dict tool_input and skip this).
+        # Windsurf/Cascade's tool_info-nested payload, or a non-standard shape — normalize to the
+        # Claude form (Claude's Write/Edit/MultiEdit always carry a dict tool_input and skip this).
         payload = normalize(payload)
+
+    # Fast path: the catch-all matcher means most invocations are non-edit tools carrying no
+    # source. Exit before resolving the repo or touching the extractor.
+    from cartogate.hookpayload import extract_proposed_text
+
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict) or not extract_proposed_text(tool_input).strip():
+        return EXIT_OK
     return run(payload, env=dict(os.environ), cwd=Path.cwd())
 
 

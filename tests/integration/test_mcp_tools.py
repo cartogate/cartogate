@@ -36,6 +36,8 @@ def test_tool_specs_are_the_expected_tools() -> None:
         "impact_summary",
         "localize",
         "slice",
+        "contract_status",
+        "gate_history",
     }
 
 

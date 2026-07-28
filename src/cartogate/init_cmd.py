@@ -40,6 +40,24 @@ and reuse any existing symbol it returns.
 `find_symbol` / `find_references`. Review health with `find_cycles`,
 `find_duplicate_bodies`, `find_dead_code`.
 
+## Definition of done (verification contracts)
+
+This repo may carry a **contract**: the declared definition of done for the current task.
+Call `contract_status` when you start, and again before you say you are finished — it returns
+the task, each declared check with pass/fail, and any attestations still pending a human.
+
+If the contract is **locked**, "done" is not yours to declare: the commit gate and the
+session-end gate refuse until every check exits 0 and every attestation is signed. Make the
+checks pass — do not edit the contract to fit the work, and do not bypass with `--no-verify`.
+An attestation can only be satisfied by a person; when one is pending, say so and stop rather
+than claiming completion.
+
+## Gate history (audit ledger)
+
+Every gate decision is recorded in a tamper-evident ledger. After a BLOCK, call
+`gate_history` before your next attempt: if you are about to repeat something the gate already
+refused, it will be in there. Changing tactics beats repeating one.
+
 ## cartogate vs grep
 
 Reach for cartogate FIRST when the question is structural - it answers with resolved facts and
@@ -267,15 +285,21 @@ def _append_agents_md(root: Path, report: _Report) -> None:
 WRITE_GATE_COMMAND = "cartogate-write-gate"
 GREP_NUDGE_COMMAND = "cartogate-grep-nudge"
 STOP_GATE_COMMAND = "cartogate-stop-gate"
+HOOKLOG_COMMAND = "cartogate-hook"
 
-#: Devin CLI's file-edit tool names (regex on the PreToolUse event's tool_name). Devin's exact
-#: built-in tool names aren't published; this superset covers the common agent conventions. The
-#: write gate FAILS OPEN on an unrecognized payload and the git pre-commit hook is the
-#: fail-closed backstop, so a matcher miss degrades safely to commit-time enforcement. VERIFY
-#: against a live Devin session and tighten to the real names.
-_DEVIN_EDIT_MATCHER = (
-    "Write|Edit|MultiEdit|str_replace|create_file|edit_file|write_file|apply_patch"
-)
+
+def _log_cmd(rel: str, event: str) -> str:
+    """The firing-log invocation for one hook entry, tagged ``<file>:<event>`` so
+    ``cartogate hooks status`` can attribute each log line to the surface that fired it."""
+    return f"{HOOKLOG_COMMAND} log --source {rel}:{event}"
+
+#: CATCH-ALL (empty regex = every tool). Devin's built-in file-edit tool names aren't published,
+#: and a name-matcher that guesses wrong yields an INERT gate — the worst outcome, since it looks
+#: installed. So the gate matches every tool and decides from the PAYLOAD instead: no proposed
+#: source -> exit 0. `cartogate-write-gate` keeps its imports lazy for exactly this reason, so
+#: non-edit calls cost only interpreter startup. The firing log records the real tool names for
+#: any future narrowing.
+_DEVIN_EDIT_MATCHER = ""
 
 
 def _pretooluse_entries(entries: object, matcher: str, command: str) -> list[object] | None:
@@ -419,6 +443,120 @@ def _install_stop_hook_devin(root: Path, report: _Report) -> None:
     report.did(f"{rel}  (Stop hook → {STOP_GATE_COMMAND})")
 
 
+#: Cascade-schema log events (`.devin/hooks.json` / `.windsurf/hooks.json`): the post twins of
+#: the blocking events plus the two turn boundaries — enough to prove each surface fires without
+#: putting a logger in any blocking path.
+_CASCADE_LOG_EVENTS = (
+    "post_write_code",
+    "post_run_command",
+    "post_mcp_tool_use",
+    "pre_user_prompt",
+)
+
+#: Cascade's session-end analogue. It fires after EVERY response and post-hooks cannot block,
+#: so the stop-gate runs in ``--advisory`` mode there: it reports an unsatisfied locked
+#: contract (visible — ``show_output``) but never refuses and never spends refusal budget.
+_CASCADE_ADVISORY_STOP = ("post_cascade_response", f"{STOP_GATE_COMMAND} --advisory", True)
+
+
+def _install_cascade_hooks_file(root: Path, rel: str, report: _Report) -> None:
+    """Write the Cascade-schema hook file at ``rel`` — merge-safe, idempotent.
+
+    Devin Desktop's user-reported build reads hook config from ``.devin/`` for BOTH its agents,
+    while the public docs still cite ``.windsurf/hooks.json`` — so init writes the same file at
+    both paths and lets the firing log say which one the build reads. Cascade schema: the event
+    map nests under a ``"hooks"`` key; entries are ``{command, powershell, show_output}``, with
+    ``powershell`` required for Windows hosts. ``pre_write_code`` runs the write gate (exit 2
+    blocks, stderr shown to the agent — the same contract as Claude's PreToolUse); the log
+    events above are silent instrumentation.
+    """
+    path = root / rel
+    data = _read_json(path)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        if hooks is not None:
+            report.note(f"{rel} 'hooks' was not an object ({type(hooks).__name__}) — replacing")
+        hooks = {}
+    added: list[str] = []
+    for event, command, show in [
+        ("pre_write_code", WRITE_GATE_COMMAND, True),
+        _CASCADE_ADVISORY_STOP,
+        *((ev, _log_cmd(rel, ev), False) for ev in _CASCADE_LOG_EVENTS),
+    ]:
+        entries = hooks.get(event)
+        entries = list(entries) if isinstance(entries, list) else []
+        if any(cmd in json.dumps(e)
+               for e in entries
+               for cmd in (HOOKLOG_COMMAND, WRITE_GATE_COMMAND, STOP_GATE_COMMAND)):
+            continue  # already instrumented (idempotent)
+        entries.append({"command": command, "powershell": command, "show_output": show})
+        hooks[event] = entries
+        added.append(event)
+    if not added:
+        report.skip(f"{rel} already instrumented")
+        return
+    data["hooks"] = hooks
+    _write_json(path, data, report)
+    report.did(f"{rel}  (Cascade-schema write gate + firing log: {len(added)} events)")
+
+
+def _install_hooklog_devin_v1(root: Path, report: _Report) -> None:
+    """Add firing-log probes to ``.devin/hooks.v1.json`` (Devin schema, top-level event map).
+
+    The catch-all ``PreToolUse`` logger (empty matcher = every tool) is how we learn Devin's
+    real edit tool names — the write-gate matcher is currently an unverified superset (task
+    #38) — and the remaining probes prove which lifecycle events this build delivers.
+    """
+    rel = ".devin/hooks.v1.json"
+    path = root / rel
+    data = _read_json(path)
+    added: list[str] = []
+    for event in ("PreToolUse", "PostToolUse"):
+        entries = _pretooluse_entries(data.get(event), "", _log_cmd(rel, event))
+        if entries is not None:
+            data[event] = entries
+            added.append(event)
+    for event in ("UserPromptSubmit", "SessionStart", "Stop"):
+        entries = _stop_entries(data.get(event), _log_cmd(rel, event))
+        if entries is not None:
+            data[event] = entries
+            added.append(event)
+    if not added:
+        report.skip(f"{rel} already carries the firing-log probes")
+        return
+    _write_json(path, data, report)
+    report.did(f"{rel}  (firing-log probes: {', '.join(added)})")
+
+
+def _install_hooklog_devin_config(root: Path, report: _Report) -> None:
+    """Probe ``.devin/config.json``'s ``"hooks"`` key (a documented alternate hooks location,
+    Devin schema) with log-only entries — never a second gate, so a build that reads both
+    files can't double-block. The MCP config in the same file is preserved."""
+    rel = ".devin/config.json"
+    path = root / rel
+    data = _read_json(path)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        if hooks is not None:
+            report.note(f"{rel} 'hooks' was not an object ({type(hooks).__name__}) — replacing")
+        hooks = {}
+    added: list[str] = []
+    pre = _pretooluse_entries(hooks.get("PreToolUse"), "", _log_cmd(rel, "PreToolUse"))
+    if pre is not None:
+        hooks["PreToolUse"] = pre
+        added.append("PreToolUse")
+    start = _stop_entries(hooks.get("SessionStart"), _log_cmd(rel, "SessionStart"))
+    if start is not None:
+        hooks["SessionStart"] = start
+        added.append("SessionStart")
+    if not added:
+        report.skip(f"{rel} hooks key already carries the firing-log probes")
+        return
+    data["hooks"] = hooks
+    _write_json(path, data, report)
+    report.did(f"{rel}  (hooks-key firing-log probes: {', '.join(added)})")
+
+
 def _install_precommit(root: Path, force: bool, report: _Report) -> None:
     if not (root / ".git").exists():
         report.note("not a git repo — skipping the pre-commit hook")
@@ -541,8 +679,9 @@ def run(
             _ensure_mcp_codex(repo, report)  # Codex uses a project .codex/config.toml (TOML)
         if agent == "devin":
             report.note(
-                "Devin Desktop MCP config is global — add cartogate to "
-                "~/.codeium/windsurf/mcp_config.json (command: cartogate-mcp). "
+                "Devin Desktop MCP config is global — add cartogate (command: cartogate-mcp) "
+                "to ~/.codeium/windsurf/mcp_config.json or ~/.codeium/mcp_config.json "
+                "(the official docs cite both; use whichever exists in your build). "
                 "See docs/INTEGRATIONS.md."
             )
 
@@ -563,6 +702,18 @@ def run(
         if "devin" in agents:
             _install_write_hook_devin(repo, report)
             _install_stop_hook_devin(repo, report)
+            # Devin Desktop hook instrumentation: the build's live hook surfaces are not
+            # reliably documented, so install MORE entries than needed — every plausible
+            # location/format, each logging its firings — and let `cartogate hooks status`
+            # say which ones this build actually reads (then prune).
+            _install_hooklog_devin_v1(repo, report)
+            _install_hooklog_devin_config(repo, report)
+            _install_cascade_hooks_file(repo, ".devin/hooks.json", report)
+            _install_cascade_hooks_file(repo, ".windsurf/hooks.json", report)
+            report.note(
+                "hook instrumentation installed across 4 locations — after a Devin Desktop "
+                "session, run `cartogate hooks status` to see which surfaces fired"
+            )
         if "codex" in agents:
             report.note(
                 "Codex has no pre-write hook surface — the commit-time gate above is the "

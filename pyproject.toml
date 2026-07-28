@@ -96,6 +96,9 @@ cartogate-grep-nudge = "cartogate.grepnudge:main"
 # The stop-gate session-end hook: bounded refusal for locked, unsatisfied contracts (spec §4),
 # wired by `cartogate init --agent claude|devin` into the harness Stop hook.
 cartogate-stop-gate = "cartogate.stopgate:main"
+# The hook firing log (Devin Desktop instrumentation): wired into every plausible hook
+# location by `cartogate init --agent devin`; read back with `cartogate hooks status`.
+cartogate-hook = "cartogate.hooklog:main"
 
 # Git-derived version (declared dynamic above): tags (v0.1.0) set the release base and every
 # commit past a tag gets a dev suffix + the short hash. The fallback covers building from a
