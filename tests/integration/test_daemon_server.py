@@ -205,3 +205,36 @@ def test_resolved_daemon_serves_resolved_tools(tmp_path: Path) -> None:
             tg.cancel_scope.cancel()
 
     anyio.run(body)
+
+
+def test_malformed_tool_argument_never_takes_the_daemon_down(tmp_path: Path) -> None:
+    """A junk scalar in a tool argument must degrade to an error response, not kill the daemon.
+
+    `dispatch` coerces numeric args (`limit`, `depth`); a `null` made that raise TypeError, which
+    `_respond` did not catch, so it escaped into the task group and tore down the WHOLE daemon —
+    warm-graph service gone for every other client of that repo. Same lesson as the oversized
+    request above: one bad request must not take the service down.
+    """
+    async def body() -> None:
+        repo = _make_repo(tmp_path)
+        refresh = GitLazyRefresh(repo, repo_id="t", debounce_s=0.0)
+        server = DaemonServer(repo, repo_id="t", token="tok", refresh=refresh)
+        async with anyio.create_task_group() as tg:
+            port: int = await tg.start(server.serve)
+
+            for tool, args in [
+                ("gate_history", {"limit": None}),
+                ("gate_history", {"limit": "twenty"}),
+                ("blast_radius", {"symbol": "x", "depth": None}),
+                ("suggest_tests", {"depth": []}),
+            ]:
+                reply = await _query(port, "tok", tool, args)
+                assert isinstance(reply, dict), f"{tool}{args} produced no response at all"
+
+            # ...and the daemon is still serving afterwards.
+            alive = await _query(port, "tok", "check_duplicate", {"signature": "def alpha():"})
+            assert alive["ok"] is True
+
+            tg.cancel_scope.cancel()
+
+    anyio.run(body)

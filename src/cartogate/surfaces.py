@@ -13,16 +13,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+#: Re-exported (redundant-alias form = the explicit re-export marker) from the leaf
+#: :mod:`cartogate.hookpayload`, which owns the key list, so the write gate's fast path can
+#: extract text without importing this module's heavier dependency tree. NOT an `__all__`:
+#: this module's public surface is much wider than this one name.
+from cartogate.hookpayload import extract_proposed_text as extract_proposed_text
 from cartogate.mcp.tools import CartogateTools
 from cartogate.schema.enums import Language, NodeKind
 from cartogate.schema.nodes import Node
 from cartogate.schema.signature import normalize_signature
 from cartogate.store.base import StoreInterface
-
-#: Tool-input keys that may carry the text an agent proposes to write. Covers the common
-#: Claude Code / Codex Write/Edit shapes; unrecognized tool schemas yield no text (the gate
-#: then allows the call — fail-open, consistent with the PreToolUse posture).
-_PROPOSED_TEXT_KEYS = ("content", "new_string", "new_str", "text")
 
 #: Files/dirs whose presence marks a directory as a project root. ``.git`` first (the universal
 #: signal — a dir for a normal clone, a *file* for a worktree/submodule), then common
@@ -188,7 +188,3 @@ def gate_proposed_source(
     return [verdict for verdict in verdicts if verdict["blocked"]]
 
 
-def extract_proposed_text(tool_input: dict[str, Any]) -> str:
-    """Pull the proposed source text out of a PreToolUse tool-input payload."""
-    parts = [tool_input[key] for key in _PROPOSED_TEXT_KEYS if isinstance(tool_input.get(key), str)]
-    return "\n".join(parts)

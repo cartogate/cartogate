@@ -207,8 +207,12 @@ def served_site(tmp_path_factory: pytest.TempPathFactory):
         '<a href="/">Home</a></body></html>',
         encoding="utf-8",
     )
-    # A target=_blank link + a popup that fires a POST on load — the guard must
-    # cover the popup (context-scoped route), not just the opener page.
+    # A target=_blank link + a popup that fires a POST — the guard must cover
+    # the popup (context-scoped route), not just the opener page. The POST is
+    # deliberately deferred past `load`: it makes the interception race
+    # deterministic instead of runner-speed-dependent, so a regression in the
+    # test's poll (see `test_discovery_guard_covers_popups`) fails everywhere
+    # rather than flaking only on a contended CI box.
     (site / "popup-opener.html").write_text(
         "<!doctype html><html><body><h1>Opener</h1>"
         '<a href="/poster.html" target="_blank">Open</a></body></html>',
@@ -216,7 +220,7 @@ def served_site(tmp_path_factory: pytest.TempPathFactory):
     )
     (site / "poster.html").write_text(
         "<!doctype html><html><body><h1>Poster</h1>"
-        "<script>fetch('/popup-mutate',{method:'POST'}).catch(()=>{});</script>"
+        "<script>setTimeout(()=>{fetch('/popup-mutate',{method:'POST'}).catch(()=>{});},400);</script>"
         "</body></html>",
         encoding="utf-8",
     )
@@ -293,6 +297,19 @@ def test_discovery_guard_covers_popups(served_site: str) -> None:
             page.get_by_role("link", name="Open").click()
         popup = popup_info.value
         popup.wait_for_load_state()
+        # The POST is script-initiated, so it is not a subresource and does not
+        # hold back `load` — the abort can still be in flight when `load`
+        # reports done, which is how a contended runner fails this (public run
+        # 29927927696 lost the race twice, including the rerun). Poll to a
+        # deadline, but pump with `wait_for_timeout` rather than `time.sleep`:
+        # the sync API only dispatches route handlers while the main thread is
+        # inside a Playwright call, so sleeping would spin without ever letting
+        # the handler append.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if any("/popup-mutate" in u for u in driver.aborted_requests):
+                break
+            popup.wait_for_timeout(50)
         assert any("/popup-mutate" in u for u in driver.aborted_requests)
     finally:
         driver.close()

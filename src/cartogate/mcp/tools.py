@@ -53,6 +53,11 @@ EXPORTS_CAP = 8
 #: overview, which describes the repo's own modules (mirrors families.py's local declaration).
 _EXTERNALS_UNIT = "<externals>"
 
+#: Default / hard cap on `gate_history` rows. The ledger is append-only and grows without
+#: bound, so the window is clamped rather than trusted — see `CartogateTools.gate_history`.
+GATE_HISTORY_DEFAULT = 20
+GATE_HISTORY_MAX = 50
+
 #: JSON-Schema tool definitions (name/description/input schema) for ``list_tools``.
 TOOL_SPECS: list[dict[str, Any]] = [
     {
@@ -77,6 +82,35 @@ TOOL_SPECS: list[dict[str, Any]] = [
                 },
             },
             "required": ["signature"],
+        },
+    },
+    {
+        "name": "contract_status",
+        "description": (
+            "Before starting work — and again before you claim to be done — read what the active "
+            "verification contract requires and which parts are satisfied now: the declared "
+            "definition of done, its checks (passing/failing), and any attestations still pending "
+            "a human. If the contract is LOCKED, the commit and session-end gates refuse until it "
+            "is satisfied. Runs the declared checks, so it costs what they cost."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "gate_history",
+        "description": (
+            "After a BLOCK, review recent gate decisions from the tamper-evident audit ledger, "
+            "newest first (blocks, passes, refusals, with their evidence), to see whether you "
+            "have already tried this — repeating a refused move is the loop to avoid."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "default": GATE_HISTORY_DEFAULT,
+                    "description": f"Rows to return (clamped to {GATE_HISTORY_MAX}).",
+                },
+            },
         },
     },
     {
@@ -795,6 +829,106 @@ class CartogateTools:
                 "dependents": dependents,
             }
 
+    # --- Contract / ledger surface (PR C) --------------------------------------------------
+    # Read-only and advisory. Both degrade to a `note` rather than raising: these run inside the
+    # agent's loop, and a gate surface that throws is a gate surface the agent learns to avoid.
+    # Imported lazily to keep this module's import cost off the write gate's path (PR B).
+
+    def contract_status(self) -> dict[str, Any]:
+        """What the active contract requires, and which parts are satisfied right now.
+
+        Without this an agent's first encounter with a LOCKED contract is being refused at
+        session end — it can neither read the definition of done nor check its progress
+        against it. Running the declared ``run:`` checks is the only way to answer honestly,
+        so this costs whatever those checks cost (same commands the commit/stop gates run).
+        """
+        if self._root is None:
+            return {"contract": None, "locked": False,
+                    "note": "workspace root unknown — pass workspace_root"}
+        from cartogate.contract import state, verify
+
+        try:
+            contract = state.load(self._root)
+        except Exception:  # noqa: BLE001 — corrupt state is the COMMIT gate's business, not ours
+            return {"contract": None, "locked": False,
+                    "note": "contract state unreadable — `cartogate task status` for details"}
+        if contract is None:
+            return {"contract": None, "locked": False}
+        try:
+            locked = verify.active_lock(self._root) is not None
+            status = verify.evaluate(contract, self._root)
+        except Exception:  # noqa: BLE001 — an exotic check must not take the tool down with it
+            return {"contract": contract.task, "locked": False,
+                    "note": "could not evaluate the declared checks"}
+        return {
+            "contract": contract.task,
+            "locked": locked,
+            "satisfied": status.ok,
+            "diverged": status.diverged,
+            "checks": [
+                {
+                    "run": r.run,
+                    "passed": r.exit_code == 0,
+                    # Only failing checks carry output: on a pass it is noise, and on a failure
+                    # the tail is the actionable part (same 5 lines the stop-gate shows).
+                    "output": _check_tail(r.output) if r.exit_code != 0 else None,
+                }
+                for r in status.checks
+            ],
+            "pending_attestations": sorted(n for n, ok in status.attest.items() if not ok),
+        }
+
+    def gate_history(self, limit: int = GATE_HISTORY_DEFAULT) -> dict[str, Any]:
+        """Recent gate decisions from the audit ledger, newest first.
+
+        Lets an agent notice it is repeating a move the gate already refused — the retry loop
+        the block-message work (STRATEGY.md law 1) exists to break.
+        """
+        if self._root is None:
+            return {"entries": [], "note": "workspace root unknown — pass workspace_root"}
+        from cartogate.audit import ledger
+
+        try:
+            entries = ledger.read(self._root)
+        except Exception:  # noqa: BLE001 — an unreadable ledger is not the agent's problem
+            return {"entries": [], "note": "ledger unreadable"}
+        try:
+            n = int(limit)
+        except (TypeError, ValueError):
+            n = GATE_HISTORY_DEFAULT
+        # Clamped, not obeyed: a ledger can hold thousands of rows, and flooding the agent's
+        # context is the one cost a tool meant to *save* it a wrong turn must never impose.
+        n = max(1, min(n, GATE_HISTORY_MAX))
+        recent = entries[::-1][:n]
+        return {
+            "entries": [
+                {"type": e.get("type"), "ts": e.get("ts"), "evidence": e.get("evidence")}
+                for e in recent
+                if isinstance(e, dict)
+            ],
+            "total": len(entries),
+        }
+
+
+def _check_tail(output: str | None, lines: int = 5) -> str:
+    """The last few non-blank lines of a failing check — the actionable part."""
+    tail = (output or "").split("\n")[-lines:]
+    return "\n".join(line for line in tail if line.strip())
+
+
+def _int_arg(arguments: dict[str, Any], key: str, default: int) -> int:
+    """An OPTIONAL numeric argument, coerced safely.
+
+    Eager ``int(arguments.get(...))`` in `dispatch` ran BEFORE each tool's own fail-open
+    guards, so a `null` (`int(None)` -> TypeError) escaped past every defense inside the tool.
+    An optional tuning knob is never worth failing a call over: junk falls back to the default.
+    """
+    value = arguments.get(key, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 
 def dispatch(tools: CartogateTools, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Route a tool call by name to the matching method. Raises on an unknown tool."""
@@ -811,7 +945,7 @@ def dispatch(tools: CartogateTools, name: str, arguments: dict[str, Any]) -> dic
     if name == "blast_radius":
         return tools.blast_radius(
             arguments["symbol"],
-            depth=int(arguments.get("depth", 1)),
+            depth=_int_arg(arguments, "depth", 1),
             edge_types=arguments.get("edge_types"),
         )
     if name == "find_symbol":
@@ -822,7 +956,7 @@ def dispatch(tools: CartogateTools, name: str, arguments: dict[str, Any]) -> dic
         return tools.suggest_tests(
             symbols=arguments.get("symbols"),
             diff=arguments.get("diff"),
-            depth=int(arguments.get("depth", 1)),
+            depth=_int_arg(arguments, "depth", 1),
         )
     if name == "doc_drift":
         return tools.doc_drift(symbols=arguments.get("symbols"), diff=arguments.get("diff"))
@@ -830,15 +964,19 @@ def dispatch(tools: CartogateTools, name: str, arguments: dict[str, Any]) -> dic
         return tools.impact_summary(
             symbols=arguments.get("symbols"),
             diff=arguments.get("diff"),
-            depth=int(arguments.get("depth", 1)),
+            depth=_int_arg(arguments, "depth", 1),
         )
     if name == "find_cycles":
         return tools.find_cycles()
+    if name == "contract_status":
+        return tools.contract_status()
+    if name == "gate_history":
+        return tools.gate_history(limit=_int_arg(arguments, "limit", GATE_HISTORY_DEFAULT))
     if name == "localize":
         return tools.localize(
             arguments["test"],
             diff=arguments.get("diff"),
-            depth=int(arguments.get("depth", DEFAULT_MAX_DEPTH)),
+            depth=_int_arg(arguments, "depth", DEFAULT_MAX_DEPTH),
         )
     if name == "slice":
         return tools.slice(
@@ -851,7 +989,7 @@ def dispatch(tools: CartogateTools, name: str, arguments: dict[str, Any]) -> dic
         return tools.find_dead_code()
     if name == "find_duplicate_bodies":
         return tools.find_duplicate_bodies(
-            min_lines=int(arguments.get("min_lines", DEFAULT_MIN_LINES))
+            min_lines=_int_arg(arguments, "min_lines", DEFAULT_MIN_LINES)
         )
     if name == "read_symbol":
         return tools.read_symbol(arguments["qualified_name"])

@@ -15,7 +15,7 @@ _USAGE = (
     "  init      set up Cartogate here (MCP + daemon); --agent <tool> adds rules + commit gate\n"
     "  daemon    manage the warm gate daemon (start|stop|status)\n"
     "  index     build/refresh the resolved graph snapshot (fast cold starts; F-09)\n"
-    "  hooks     install git hooks that refresh the snapshot on commit/merge/checkout\n"
+    "  hooks     git refresh hooks (install|uninstall) + agent hook firing report (status)\n"
     "  doctor    check Cartogate is healthy: daemon, live gate probe, hook wiring\n"
     "  stats     what Cartogate knows about this repo + duplicates it has prevented\n"
     "  audit     verify / inspect the tamper-evident gate-decision ledger\n"

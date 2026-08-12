@@ -2,7 +2,8 @@
 
 A single long-lived process holds the graph **warm-resident** (the spec's cheapest path to
 the p95 ≤ 50 ms gate, §8.5) and exposes the deterministic ``TOOL_SPECS`` tools over stdio — the
-one transport confirmed available inside FedRAMP (§9), needing a single whitelist entry. The
+one transport confirmed available in locked-down environments (§9), needing a single whitelist
+entry. The
 server is a thin, data-driven adapter (``list_tools`` and ``call_tool`` both derive from
 ``TOOL_SPECS``/``dispatch``), so the surface can't drift from :mod:`cartogate.mcp.tools` and an
 SDK API change (risk R6) is contained to this file, guarded by the list-tools smoke test.

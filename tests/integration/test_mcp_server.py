@@ -55,6 +55,8 @@ def test_server_lists_tools_and_dispatches_check_duplicate() -> None:
                 "impact_summary",
                 "localize",
                 "slice",
+                "contract_status",
+                "gate_history",
             }
 
             result = await client.call_tool(
@@ -1081,7 +1083,7 @@ def test_lazy_server_lists_tools_without_waiting_for_the_index() -> None:
         async with create_connected_server_and_client_session(server) as client:
             # list_tools returns immediately even though prime() has never run.
             listed = await client.list_tools()
-            assert len(listed.tools) == 16  # the 15 graph tools + the set_workspace control tool
+            assert len(listed.tools) == 18  # the 17 graph tools + the set_workspace control tool
             assert "set_workspace" in {t.name for t in listed.tools}
             assert refresh.primed is False  # the index has NOT been built yet
 

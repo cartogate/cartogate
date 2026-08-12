@@ -200,5 +200,16 @@ class DaemonServer:
             return build_error("daemon not ready")
         try:
             return build_ok(dispatch(self._tools, tool, arguments))
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, TypeError) as exc:
+            # TypeError belongs here for the same reason DelimiterNotFound is caught in _handle:
+            # a malformed argument (a JSON `null` where a number was expected) would otherwise
+            # escape into the task group and take the WHOLE daemon down — warm-graph service
+            # gone for every other client of this repo. One bad request, one bad response.
+            #
+            # But this wraps the whole dispatch, so it also swallows a genuine internal bug that
+            # merely LOOKS like a bad argument. Record it exactly as _refresh_if_needed does, so
+            # `cartogate doctor` surfaces it instead of the daemon failing quietly forever.
+            self._errors += 1
+            self._last_error = f"{type(exc).__name__}: {exc}"
+            _LOG.warning("daemon tool call %r failed: %s", tool, exc)
             return build_error(str(exc))

@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-
-from types import SimpleNamespace
 
 from cartogate.nav.discover import (
     DiscoveryBudget,

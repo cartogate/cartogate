@@ -46,7 +46,17 @@ def main(argv: list[str] | None = None) -> int:
 
     Reads the Stop-hook payload on stdin (garbage tolerated). Returns 0 (allow) or 2
     (refuse). Never raises — fail-open, the commit gate is the fail-closed backstop.
+
+    ``--advisory`` REPORTS instead of refusing: always exit 0, spend no refusal budget, write
+    no ledger entry, and stay silent unless a locked contract is actually unsatisfied. It is
+    for harnesses whose session-end event cannot block — Devin Desktop's Cascade agent fires
+    ``post_cascade_response`` after every turn, and post-hooks can't refuse — where the
+    blocking path would both fail to bind and nag on every single turn.
     """
+    # The installed `cartogate-stop-gate` shim calls main() with NO argv and leaves the flag
+    # in sys.argv, so an argv-only read makes `--advisory` a no-op in the one place `init`
+    # actually wires it. Fall back to sys.argv, as `audit_cli.main` does.
+    advisory = "--advisory" in (argv if argv is not None else sys.argv[1:])
     try:
         stdin_text = sys.stdin.read()
         try:
@@ -69,6 +79,13 @@ def main(argv: list[str] | None = None) -> int:
         status = verify.evaluate(contract, repo)
         if divergence is None and status.ok:
             return 0  # satisfied, anchored — a clean exit
+        if advisory:
+            print(
+                f"Cartogate: locked contract {contract.task!r} is not satisfied yet.\n\n"
+                f"{_refusal_reasons(contract, status, divergence)}",
+                file=sys.stderr,
+            )
+            return 0
         n = state.bump_stop_refusals(repo)
         if n > contract.stop_budget:
             # Bounded refusal: an unbounded stop-gate would ping-pong a stuck agent forever.

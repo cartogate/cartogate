@@ -53,6 +53,10 @@ def test_surface_unchanged() -> None:
         "read_symbol": ["qualified_name"],
         "implementations": ["qualified_name"],
         "repo_map": [],
+        # PR C — the contract/ledger surface. Both take no required argument: an agent that has
+        # to know what to ask for won't ask.
+        "contract_status": [],
+        "gate_history": [],
     }
 
     actual_names = {spec["name"] for spec in TOOL_SPECS}
@@ -72,3 +76,31 @@ def test_surface_unchanged() -> None:
             f"  Expected: {expected_required}\n"
             f"  Got: {required}"
         )
+
+
+def test_docs_tool_count_matches_the_surface() -> None:
+    """The published tool count is hardcoded in prose, so it silently drifts every time the
+    surface grows — it sat at "13" through two releases that shipped more. Pin it: doc drift is
+    the exact failure Cartogate exists to catch, and shipping it in our own docs is a bad look.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    expected = f"{len(TOOL_SPECS)} "
+    markers = (
+        "deterministic tools", "serves all", "What the agent gets", "tools are deterministic",
+    )
+    # CLAUDE.md is stripped from the public projection, so its absence is normal, not a failure —
+    # a test that assumed it existed would ship a RED suite to the public repo.
+    counted = ("docs/INTEGRATIONS.md", "CLAUDE.md")
+    present = [root / rel for rel in counted if (root / rel).is_file()]
+    assert present, "no counted docs found at all — the test has lost its target"
+    stale = [
+        f"{path.name}: {line.strip()}"
+        for path in present
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if any(m in line for m in markers) and expected not in line
+    ]
+    assert not stale, (
+        f"tool count is stale (surface is {len(TOOL_SPECS)}):\n" + "\n".join(stale)
+    )
