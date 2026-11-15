@@ -11,6 +11,7 @@ from anyio.streams.buffered import BufferedByteReceiveStream
 from cartogate.daemon.protocol import build_request, decode, encode
 from cartogate.daemon.refresh import GitLazyRefresh
 from cartogate.daemon.server import DaemonServer
+from cartogate.mcp.present import SURFACE_VERSION
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -161,6 +162,8 @@ def test_server_health_endpoint(tmp_path: Path) -> None:
             assert resp["ok"] is True
             health = resp["result"]
             assert health["repo_id"] == "t"
+            # The result shape this daemon serves, so a server with another one replaces it.
+            assert health["surface"] == SURFACE_VERSION
             assert health["nodes"] >= 1  # alpha() at least
             assert health["units"] >= 1
             assert health["errors"] == 0

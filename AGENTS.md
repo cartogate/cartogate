@@ -7,9 +7,10 @@ structural facts.
 
 ## The hard gate (can BLOCK — fix the issue, don't work around it)
 
-- **Before creating a new function or class**, call `check_duplicate(signature)`. If it returns a
-  hit, **reuse the existing symbol** instead of writing a new one. A `PreToolUse` (write-time) or
-  git pre-commit block means a real duplicate on extracted evidence.
+- **Before creating a new function or class**, call `check_duplicate(signature, language)`. If it
+  returns a hit, **reuse the existing symbol** instead of writing a new one. Without `language`, the
+  check runs as Python and a match in another language is reported as a near match, not a block.
+  A `PreToolUse` (write-time) or git pre-commit block means a real duplicate on extracted evidence.
 
 ## Advisory tools (never block — use them to work safely)
 

@@ -7,10 +7,14 @@ Used throughout the nav module tests and available for integration tests via
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
-from cartogate.nav.driver import DriverError, Target, Wait  # noqa: F401
+from cartogate.nav.driver import (  # noqa: F401
+    DriverError,
+    Target,
+    Wait,
+    url_matched,
+)
 
 TargetKey = str  # "role:name" or "css:selector"
 
@@ -126,16 +130,15 @@ class FakeDriver:
         """
         if wait.url_matches is not None:
             pattern = wait.url_matches
-            if not re.search(pattern, self._current_url):
+            if not url_matched(pattern, self._current_url):
                 raise DriverError(
                     f"wait_for url_matches {pattern!r}: current URL {self._current_url!r}"
                 )
-        elif wait.target_visible is not None:
-            if not self.is_visible(wait.target_visible):
-                raise DriverError(
-                    f"wait_for target_visible: {key_of(wait.target_visible)!r} "
-                    f"not visible on {self._current_url!r}"
-                )
+        elif wait.target_visible is not None and not self.is_visible(wait.target_visible):
+            raise DriverError(
+                f"wait_for target_visible: {key_of(wait.target_visible)!r} "
+                f"not visible on {self._current_url!r}"
+            )
 
     def is_visible(self, target: Target) -> bool:
         """Check if the target element is currently visible.

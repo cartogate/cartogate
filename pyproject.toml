@@ -34,11 +34,18 @@ dependencies = [
     "tree-sitter-kotlin>=1.1",  # Kotlin grammar (F-08)
     "tree-sitter-swift>=0.7",  # Swift grammar (F-08)
     "jedi>=0.19",  # Python name resolution — in-process, deterministic, air-gapped
+    # Validates tool-call arguments against each tool's advertised inputSchema. mcp 1.x did this
+    # in the SDK; 2.0 dropped per-tool validation, so the check moved into our call handler.
+    # Already installed transitively (mcp requires it) — declared because we import it directly.
+    "jsonschema>=4.20",
     # The MCP server is a primary surface (Windsurf / Claude Code / Cursor / …), so its SDK ships by
     # default too — a bare install gives a working `cartogate-mcp`, no extra to remember/forget.
-    # Pinned below 2.0: the low-level Server API is used directly; a major bump may change the
-    # list_tools/call_tool handler contract (risk R6). Verified with 1.28.
-    "mcp>=1.2,<2",
+    # Floor at 2: the low-level Server API is used directly, and 2.0 replaced decorator handler
+    # registration with `add_request_handler` — 1.x and 2.x cannot share one call site. Capped below
+    # 3 for the same reason the 1.x cap existed (risk R6): a major bump may move that contract
+    # again. Verified with 2.0.0. Note the SDK bump does NOT drop older clients — 2.x still speaks
+    # protocol versions back to 2024-11-05, so the handshake range is unchanged.
+    "mcp>=2,<3",
 ]
 
 [project.urls]
@@ -70,6 +77,7 @@ dev = [
     "hypothesis>=6",
     "ruff>=0.6",
     "mypy>=1.11",
+    "types-jsonschema>=4.20",  # stubs for the tool-argument validator (stub-only, dev-time)
     "freezegun>=1.5",
     "pip-audit>=2.7",  # dependency CVE scanning (wire into CI, F-29)
     "build>=1.2",  # PEP 517 sdist/wheel build (packaging-readiness CI job)
@@ -140,14 +148,6 @@ warn_unused_ignores = true
 [[tool.mypy.overrides]]
 module = ["psutil.*", "networkx.*", "jedi.*", "tree_sitter_python.*", "playwright.*", "selenium.*"]
 ignore_missing_imports = true
-
-# The MCP low-level SDK exposes untyped decorators (list_tools/call_tool); relax only the
-# decorator/call strictness for the thin server adapter that wires them (risk R6 is covered
-# by the list-tools smoke test instead).
-[[tool.mypy.overrides]]
-module = ["cartogate.mcp.server"]
-disallow_untyped_decorators = false
-disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 minversion = "8.0"

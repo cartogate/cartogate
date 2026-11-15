@@ -32,8 +32,9 @@ MCP_COMMAND = "cartogate-mcp"
 #: The always-on rule that tells an agent *when* to call the tools (surface B).
 RULE_NUDGE = """# Cartogate rules
 
-**Gate (can BLOCK):** before creating a function or class, call `check_duplicate(signature)`
-and reuse any existing symbol it returns.
+**Gate (can BLOCK):** before creating a function or class, call
+`check_duplicate(signature, language)` and reuse any existing symbol it returns. Name the
+language: without it the check runs as python.
 
 **Advisory (never block):** before changing an exported symbol, call `blast_radius` (or
 `impact_summary`). After editing, call `suggest_tests` and `doc_drift`. Navigate with
@@ -504,8 +505,10 @@ def _install_hooklog_devin_v1(root: Path, report: _Report) -> None:
     """Add firing-log probes to ``.devin/hooks.v1.json`` (Devin schema, top-level event map).
 
     The catch-all ``PreToolUse`` logger (empty matcher = every tool) is how we learn Devin's
-    real edit tool names — the write-gate matcher is currently an unverified superset (task
-    #38) — and the remaining probes prove which lifecycle events this build delivers.
+    real edit tool names — the write gate itself is catch-all for the same reason and decides
+    from the payload instead (see ``_DEVIN_EDIT_MATCHER``), so narrowing it waits on this
+    log's evidence (task #38) — and the remaining probes prove which lifecycle events this
+    build delivers.
     """
     rel = ".devin/hooks.v1.json"
     path = root / rel

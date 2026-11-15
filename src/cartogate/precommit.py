@@ -806,22 +806,20 @@ def _enforce_contract(repo: Path) -> int:
         return 1
 
 
-_NEXT_CONFIG_MARKERS = (
-    "next.config.js", "next.config.ts", "next.config.mjs", "next.config.cjs",
-)
-
-
 def _next_evidence_at(prefix: str, tracked: set[str], repo: Path) -> bool:
     """NEXT evidence for the project dir ``prefix`` (advisory-side, index blobs).
 
     A tracked next.config.*, or a tracked package.json whose INDEX content
     depends on "next" — mere package.json presence corroborates nothing
     (corpus round 2: components dirs named pages/ minted phantom routes).
+    Marker names and the JSON rule are routes_js's own — one source of truth.
     """
     import json
 
+    from cartogate.extract.routes_js import _NEXT_CONFIGS, _package_declares_next
+
     joined = f"{prefix}/" if prefix else ""
-    if any(f"{joined}{cfg}" in tracked for cfg in _NEXT_CONFIG_MARKERS):
+    if any(f"{joined}{cfg}" in tracked for cfg in _NEXT_CONFIGS):
         return True
     pkg_path = f"{joined}package.json"
     if pkg_path not in tracked:
@@ -830,15 +828,9 @@ def _next_evidence_at(prefix: str, tracked: set[str], repo: Path) -> bool:
     if blob is None:
         return False
     try:
-        data = json.loads(blob.decode("utf-8", "replace"))
+        return _package_declares_next(json.loads(blob.decode("utf-8", "replace")))
     except ValueError:
         return False
-    if not isinstance(data, dict):
-        return False
-    return any(
-        isinstance(data.get(section), dict) and "next" in data[section]
-        for section in ("dependencies", "devDependencies")
-    )
 
 
 def _nextjs_pattern_for_repo_path(
@@ -846,31 +838,17 @@ def _nextjs_pattern_for_repo_path(
 ) -> str | None:
     """Best-effort Next.js url pattern for a repo-relative file path.
 
-    The route tree may be nested (``web/app/items/page.tsx``) — slice from the
-    first ``app``/``pages`` segment that yields a pattern, but ONLY when the
-    segment's parent is corroborated as a framework root (repo root, or a
-    tracked package.json/next.config sibling). Without corroboration a
-    coincidental ``docs/app/page.tsx`` would read as route ``/`` (review
-    Medium: filename-coincidence false positive — the gate-fatigue law says
-    silence beats a wrong advisory).
+    Same walk as the extractor's tree derivation — routes_js owns the skeleton
+    (_nextjs_pattern_with_evidence); only the corroboration probe differs here
+    (git INDEX blobs instead of the working tree), because the advisory judges
+    what is STAGED, not what is on disk.
     """
-    from cartogate.extract.routes_js import _nextjs_pattern
+    from cartogate.extract.routes_js import _nextjs_pattern_with_evidence
 
-    parts = tuple(rel_posix.split("/"))
-    for i, seg in enumerate(parts):
-        if seg not in ("app", "pages"):
-            continue
-        base_parts = parts[:i]
-        if base_parts and base_parts[-1] == "src":
-            base_parts = base_parts[:-1]  # standard src/ layout at ANY depth
-        project_prefix = "/".join(base_parts)
-        corroborated = _next_evidence_at(project_prefix, tracked, repo)
-        if not corroborated:
-            continue
-        pattern = _nextjs_pattern(parts[i:])
-        if pattern is not None:
-            return pattern
-    return None
+    def _index_evidence(base_parts: tuple[str, ...]) -> bool:
+        return _next_evidence_at("/".join(base_parts), tracked, repo)
+
+    return _nextjs_pattern_with_evidence(tuple(rel_posix.split("/")), _index_evidence)
 
 
 def _checked_in_navmap_states(repo: Path) -> list[tuple[str, str, str]]:
@@ -910,6 +888,32 @@ def _checked_in_navmap_states(repo: Path) -> list[tuple[str, str, str]]:
             ):
                 out.append((map_path, state["id"], state["url"]))
     return out
+
+
+def _route_shape(url_or_pattern: str) -> str:
+    """The url with every ``/:param`` segment reduced to ``/:*`` — param NAMES are
+    documentation; the segment shape is the route."""
+    import re
+
+    return re.sub(r"(?<=/):\w+", ":*", url_or_pattern)
+
+
+def _url_references_pattern(url_path: str, pattern: str) -> bool:
+    """Whether a map state's url (fragment pre-stripped) references ``pattern``.
+
+    Deliberately NOT exact string equality: a map may pin a CONCRETE url
+    (``/items/7``) for a param route (``/items/:id``), and a map author may
+    spell a param differently (``:itemId`` vs ``:id``). Segment shapes must
+    still align exactly — ``/about/team`` never references ``/about``. Mirrors
+    nav/runtime's pattern semantics, re-implemented locally because the gate
+    path must not import ``cartogate.nav`` (isolation law).
+    """
+    import re
+
+    if url_path == pattern or _route_shape(url_path) == _route_shape(pattern):
+        return True
+    regex = re.sub(r"(?<=/):\w+", "[^/]+", re.escape(pattern))
+    return re.fullmatch(regex, url_path) is not None
 
 
 def _print_navmap_drift_advisory(repo: Path) -> None:
@@ -1011,7 +1015,7 @@ def _print_navmap_drift_advisory(repo: Path) -> None:
         for map_path, state_id, url in map_states:
             url_path = url.split("#")[0]
             for pat, evidence in removed:
-                if url_path == pat:
+                if _url_references_pattern(url_path, pat):
                     hits.append((pat, evidence, map_path, state_id))
         if not hits:
             return

@@ -264,3 +264,65 @@ def test_fragment_bearing_map_url_still_matches(
     err = capsys.readouterr().err
     assert "NAVMAP DRIFT ADVISORY" in err
     assert "about.team" in err
+
+
+def test_concrete_map_url_matches_a_deleted_param_route(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A map may pin a CONCRETE url (/items/7) for a param route (/items/:id).
+    Exact-string matching missed it — the map still chases the dead route."""
+    init_git_repo(tmp_path)
+    _write(tmp_path, "package.json", NEXT_PKG)
+    _write(tmp_path, "app/items/[id]/page.tsx", "export default function P() {}\n")
+    _write(tmp_path, "navmap.json", _navmap_body(("item7", "/items/7")))
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "seed", "--no-verify")
+
+    _git(tmp_path, "rm", "-q", "-r", "app/items")
+
+    assert precommit_main([str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    assert "NAVMAP DRIFT ADVISORY" in err
+    assert "item7" in err
+
+
+def test_param_name_variance_still_matches(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same route shape, different param spelling (:itemId vs :id) must match —
+    param NAMES are documentation, the segment shape is the route."""
+    init_git_repo(tmp_path)
+    _write(tmp_path, "package.json", NEXT_PKG)
+    _write(tmp_path, "app/items/[id]/page.tsx", "export default function P() {}\n")
+    _write(tmp_path, "navmap.json", _navmap_body(("items", "/items/:itemId")))
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "seed", "--no-verify")
+
+    _git(tmp_path, "rm", "-q", "-r", "app/items")
+
+    assert precommit_main([str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    assert "NAVMAP DRIFT ADVISORY" in err
+
+
+def test_pattern_matching_does_not_over_match_prefixes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Loosening exact-match must not invent hits: /about/team does not
+    reference /about, and /items does not reference /items/:id."""
+    init_git_repo(tmp_path)
+    _write(tmp_path, "package.json", NEXT_PKG)
+    _write(tmp_path, "app/about/page.tsx", "export default function A() {}\n")
+    _write(tmp_path, "app/items/[id]/page.tsx", "export default function P() {}\n")
+    _write(
+        tmp_path, "navmap.json",
+        _navmap_body(("team", "/about/team"), ("items", "/items")),
+    )
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "seed", "--no-verify")
+
+    _git(tmp_path, "rm", "-q", "-r", "app/about")
+    _git(tmp_path, "rm", "-q", "-r", "app/items")
+
+    assert precommit_main([str(tmp_path)]) == 0
+    assert "NAVMAP DRIFT ADVISORY" not in capsys.readouterr().err

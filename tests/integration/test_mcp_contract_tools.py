@@ -3,8 +3,10 @@
 v0.7.0 shipped verification contracts and the audit ledger, but exposed neither to the agent:
 its first encounter with a locked contract was BEING REFUSED at session end, which is a
 terrible way to learn the rules, and it had no way to notice it was repeating a blocked move.
-Both tools are read-only and advisory — they never block, and they degrade (never raise) on a
-missing root or corrupt state, because a gate surface that throws trains agents to avoid it.
+Both tools are advisory — they never block, and they degrade (never raise) on a missing root or
+corrupt state, because a gate surface that throws trains agents to avoid it. Only `gate_history`
+is read-only: `contract_status` RUNS the contract's declared checks, which is why it carries
+different MCP annotations (see `_CONTRACT_STATUS_ANNOTATIONS` in mcp/server.py).
 """
 from __future__ import annotations
 
@@ -57,6 +59,32 @@ class TestContractStatus:
         assert result["checks"][0]["passed"] is False
         assert result["checks"][0]["run"]  # the agent can see WHAT it must make pass
 
+    def test_executes_declared_checks_so_it_is_not_read_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Answering honestly means RUNNING the contract's `run:` commands — arbitrary shell.
+
+        This pins the behaviour the MCP annotations depend on. Hosts use `readOnlyHint` to
+        AUTO-APPROVE tool calls without prompting the user, so were this tool ever advertised
+        read-only, an agent could be driven to run whatever a repo's contract declares,
+        unattended. If this test ever fails because the tool stopped running checks, the
+        annotations in mcp/server.py should be revisited too.
+        """
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        sentinel = tmp_path / "the_check_ran.txt"
+        script = f"open(r'{sentinel}', 'w').write('ran')"
+        p = _write_contract(
+            tmp_path,
+            {"task": "prove the checks execute", "checks": [{"run": f'{_PY} -c "{script}"'}]},
+        )
+        task_main(["declare", str(p), "--lock"])
+        assert not sentinel.exists()
+
+        _tools(tmp_path).contract_status()
+
+        assert sentinel.exists(), "contract_status did not execute the declared check"
+
     def test_satisfied_contract_reports_ok(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -82,6 +110,30 @@ class TestContractStatus:
         result = _tools(tmp_path).contract_status()
         assert result["satisfied"] is False
         assert result["pending_attestations"] == ["ux_reviewed"]
+
+    def test_every_result_variant_matches_the_output_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The full contract shape (checks/attestations) is unreachable from the consistency
+        sweep's plain fixture, so a schema drift there would ship silently — validate every
+        variant this surface actually returns against the advertised ``output_schema``."""
+        import jsonschema
+
+        schema = next(s for s in TOOL_SPECS if s["name"] == "contract_status")["output_schema"]
+        jsonschema.validate(_tools(None).contract_status(), schema)  # no-root note
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        jsonschema.validate(_tools(tmp_path).contract_status(), schema)  # no contract
+        p = _write_contract(
+            tmp_path,
+            {
+                "task": "t",
+                "checks": [{"run": f'{_PY} -c "import sys; sys.exit(1)"'}],
+                "attest": ["ux_reviewed"],
+            },
+        )
+        task_main(["declare", str(p), "--lock"])
+        jsonschema.validate(_tools(tmp_path).contract_status(), schema)  # full, failing check
 
     def test_corrupt_state_degrades_instead_of_raising(self, tmp_path: Path) -> None:
         from cartogate.contract import state
@@ -116,6 +168,17 @@ class TestGateHistory:
         assert [e["evidence"]["signature"] for e in entries] == ["f2()", "f1()", "f0()"]
         assert entries[0]["type"] == "commit_block"
         assert "ts" in entries[0]
+
+    def test_populated_ledger_matches_the_output_schema(self, tmp_path: Path) -> None:
+        """A ledger with real rows is unreachable from the consistency sweep's plain fixture —
+        validate the populated shape (and the no-root note shape) against ``output_schema``."""
+        import jsonschema
+
+        schema = next(s for s in TOOL_SPECS if s["name"] == "gate_history")["output_schema"]
+        jsonschema.validate(_tools(None).gate_history(), schema)
+        _init(tmp_path)
+        ledger.append(tmp_path, entry_type="commit_block", tree=None, evidence={"signature": "f()"})
+        jsonschema.validate(_tools(tmp_path).gate_history(), schema)
 
     def test_limit_caps_the_window(self, tmp_path: Path) -> None:
         _init(tmp_path)

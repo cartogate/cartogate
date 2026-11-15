@@ -14,7 +14,7 @@ by the pipeline after the structural walk, returning its own nodes/edges.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from hashlib import blake2b
 from pathlib import Path
@@ -83,6 +83,17 @@ _NEXT_CONFIGS = (
 )
 
 
+def _package_declares_next(data: object) -> bool:
+    """Whether parsed package.json content depends on "next" — the ONE JSON rule
+    shared by the tree-side and index-side evidence checks (they diverged once)."""
+    if not isinstance(data, dict):
+        return False
+    return any(
+        isinstance(data.get(section), dict) and "next" in data[section]
+        for section in ("dependencies", "devDependencies")
+    )
+
+
 def _has_next_evidence(directory: Path) -> bool:
     """Whether ``directory`` is a NEXT.JS project root — not merely a JS one.
 
@@ -100,16 +111,9 @@ def _has_next_evidence(directory: Path) -> bool:
         pkg = directory / "package.json"
         if not pkg.is_file():
             return False
-        data = json.loads(pkg.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return False
-        for section in ("dependencies", "devDependencies"):
-            deps = data.get(section)
-            if isinstance(deps, dict) and "next" in deps:
-                return True
+        return _package_declares_next(json.loads(pkg.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return False
-    return False
 
 
 def _nextjs_pattern_for_tree(rel_parts: tuple[str, ...], root: Path) -> str | None:
@@ -121,14 +125,29 @@ def _nextjs_pattern_for_tree(rel_parts: tuple[str, ...], root: Path) -> str | No
     segment's parent dir for nested monorepo apps. A components dir that
     merely LOOKS like a pages tree stays silent (see _has_next_evidence).
     """
+    def _tree_evidence(base_parts: tuple[str, ...]) -> bool:
+        return _has_next_evidence(root.joinpath(*base_parts) if base_parts else root)
+
+    return _nextjs_pattern_with_evidence(rel_parts, _tree_evidence)
+
+
+def _nextjs_pattern_with_evidence(
+    rel_parts: tuple[str, ...],
+    has_evidence: Callable[[tuple[str, ...]], bool],
+) -> str | None:
+    """The app/pages tree walk shared by BOTH pattern derivations — the filesystem
+    one above and the commit gate's git-index one (precommit), which previously
+    carried a diverging copy. ``has_evidence`` receives the candidate project
+    root's path segments (src/ already stripped) and answers the corroboration
+    question in its own medium.
+    """
     for i, seg in enumerate(rel_parts):
         if seg not in ("app", "pages"):
             continue
         base_parts = rel_parts[:i]
         if base_parts and base_parts[-1] == "src":
             base_parts = base_parts[:-1]  # standard src/ layout at ANY depth
-        project_dir = root.joinpath(*base_parts) if base_parts else root
-        if not _has_next_evidence(project_dir):
+        if not has_evidence(base_parts):
             continue
         pattern = _nextjs_pattern(rel_parts[i:])
         if pattern is not None:

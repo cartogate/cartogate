@@ -47,7 +47,7 @@ pipx install --force "git+https://github.com/cartogate/cartogate.git@stable"
 
 ## The tools
 
-Cartogate exposes 13 MCP tools. One can block; the rest are advisory and never will.
+Cartogate exposes 18 MCP tools. One can block; the rest are advisory and never will.
 
 | Tool | Purpose |
 |---|---|
@@ -63,11 +63,20 @@ Cartogate exposes 13 MCP tools. One can block; the rest are advisory and never w
 | `find_cycles` | Module-level dependency cycles |
 | `find_duplicate_bodies` | Copy-pasted function bodies, even across renames |
 | `find_dead_code` | Unreferenced internal symbols |
+| `read_symbol` | Read one symbol's source by name, without opening the file |
+| `implementations` | Which classes implement or subclass a type |
+| `repo_map` | Orientation in an unfamiliar repo: files or directories, sizes, public exports |
+| `contract_status` | What the active verification contract requires and what is satisfied |
+| `gate_history` | Recent gate decisions from the audit ledger |
 | `set_workspace` | Point the server at a project when the editor provides no workspace signal |
 
 Lookups accept bare names, dotted suffixes, or fully-qualified names; misses return
 candidates instead of empty results. Every tool takes an optional `workspace_root`, so an
 agent's first call configures the workspace and runs in one round trip.
+
+List results are paged: 20 rows by default, within 8,000 characters. `count` is always the true
+total. A cut result says `truncated: true` and gives `next_offset`; pass `limit` (up to 200) and
+`offset` to see more.
 
 Two properties are load-bearing:
 

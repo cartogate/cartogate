@@ -32,8 +32,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from cartogate.nav.driver import Driver, Target
-from cartogate.nav.runtime import _url_matches_pattern
-from cartogate.nav.schema import NavMapError, load
+from cartogate.nav.proposals import echo_seed_state, write_proposal_doc
+from cartogate.nav.runtime import _parse_live_fragment, _url_matches_pattern
+from cartogate.nav.schema import NavMap, NavMapError, State, load
 
 _NAV_ROLES = frozenset({"link", "button", "radio", "tab", "menuitem"})
 
@@ -91,9 +92,16 @@ def _is_loopback(url: str) -> bool:
     return addr.is_loopback or addr == ipaddress.ip_address("0.0.0.0")
 
 
+#: Scheme-implied ports, filled in when a URL omits its port so `localhost` and
+#: `localhost:80` compare as ONE origin (unnormalized they read as different origins,
+#: turning same-origin links into spurious dead-ends).
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
 def _origin(url: str) -> tuple[str, str, int | None]:
-    parsed = urlparse(url)
-    return (parsed.scheme, parsed.hostname or "", parsed.port)
+    parsed = urlparse(url)  # urlparse lowercases scheme and hostname already
+    port = parsed.port if parsed.port is not None else _DEFAULT_PORTS.get(parsed.scheme)
+    return (parsed.scheme, parsed.hostname or "", port)
 
 
 def _state_id_for_path(path: str) -> str:
@@ -107,14 +115,15 @@ def _state_id_for_path(path: str) -> str:
 class _StateResolver:
     """Collapses observed URLs onto seed patterns, minting stable new ids."""
 
-    def __init__(self, seed_states: list[Any]) -> None:
-        # (state_id, path_pattern, param_count) most-specific first.
+    def __init__(self, seed_states: list[State]) -> None:
+        # (state_id, path_pattern, param_count, declared_fragment) most-specific first:
+        # fewest params, then MOST fragment pairs (runtime's where() ordering), then id.
         self._patterns = sorted(
             (
-                (s.id, s.url.split("#")[0], s.url.split("#")[0].count("/:"))
+                (s.id, s.url.split("#")[0], s.url.split("#")[0].count("/:"), s.fragment)
                 for s in seed_states
             ),
-            key=lambda t: (t[2], t[0]),
+            key=lambda t: (t[2], -len(t[3]), t[0]),
         )
         self._seed_ids = {s.id for s in seed_states}
         self._new_by_path: dict[str, str] = {}
@@ -127,9 +136,18 @@ class _StateResolver:
         # stays "/") — otherwise the second spelling mints a spurious docs~2.
         if len(path) > 1:
             path = path.rstrip("/") or "/"
-        for state_id, pattern, _ in self._patterns:
-            if _url_matches_pattern(path, pattern):
-                return state_id, False
+        # Seed matching mirrors the runtime: path pattern + declared-fragment subset
+        # semantics, so fragment-DECLARED seeds (/viz#v=a vs /viz#v=b) stay distinct.
+        # NEW-state equivalence below stays deliberately route-only — fragments only
+        # distinguish states their author declared; minting per-fragment states for
+        # undeclared pages would explode on scroll anchors.
+        live_fragment = _parse_live_fragment(url)
+        for state_id, pattern, _, declared in self._patterns:
+            if not _url_matches_pattern(path, pattern):
+                continue
+            if declared and not all(live_fragment.get(k) == v for k, v in declared):
+                continue
+            return state_id, False
         if path in self._new_by_path:
             return self._new_by_path[path], False
         base = _state_id_for_path(path)
@@ -294,6 +312,7 @@ def _propose_state(driver: Driver, state_id: str) -> dict[str, Any]:
     return {
         "id": state_id,
         "url": path,
+        "provenance": "crawled",
         "landmarks": [
             {**lm, "provenance": "crawled"} for lm in inv.get("landmarks", [])
         ],
@@ -304,52 +323,24 @@ def _propose_state(driver: Driver, state_id: str) -> dict[str, Any]:
     }
 
 
-def _echo_seed_state(state: Any) -> dict[str, Any]:
-    return {
-        "id": state.id,
-        "url": state.url,
-        "landmarks": [
-            {
-                "role": lm.role,
-                "name": lm.name,
-                **({"checked": lm.checked} if lm.checked is not None else {}),
-                "provenance": lm.provenance,
-            }
-            for lm in state.landmarks
-        ],
-        "affordances": [
-            {
-                "ref": aff.ref,
-                "role": aff.role,
-                "name": aff.name,
-                **({"css": aff.css} if aff.css else {}),
-                "provenance": aff.provenance,
-            }
-            for aff in state.affordances
-        ],
-    }
-
-
 def _write_proposals(
-    map_path: Path, raw: dict[str, Any], navmap: Any, proposed: dict[str, dict[str, Any]]
+    map_path: Path, raw: dict[str, Any], navmap: NavMap, proposed: dict[str, dict[str, Any]]
 ) -> Path:
-    states = [_echo_seed_state(s) for s in navmap.states]
+    states = [echo_seed_state(s) for s in navmap.states]
     states.extend(proposed[k] for k in sorted(proposed))
-    doc = {
-        "comment": (
+    # Transitions ship in the sidecar, not the doc: a discovered edge is only a
+    # candidate until its source state declares the affordance to click.
+    return write_proposal_doc(
+        map_path,
+        raw,
+        states,
+        comment=(
             "Discovered proposals — review, edit, and merge into the map "
             "yourself; discovered states are runtime-observed (crawled "
             "provenance) and never authoritative."
         ),
-        "version": raw.get("version", 1),
-        "app": raw.get("app", ""),
-        "states": states,
-        "transitions": [],
-        "flows": raw.get("flows", []),
-    }
-    out = map_path.with_suffix(".proposed.json")
-    out.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return out
+        transitions=[],
+    )
 
 
 def _write_transition_sidecar(

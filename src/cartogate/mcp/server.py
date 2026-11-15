@@ -27,10 +27,11 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 import anyio
+import jsonschema
 import mcp.types as types
+from mcp.server.context import ServerRequestContext
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from pydantic import AnyUrl
 
 import cartogate
 from cartogate.daemon import client as daemon_client
@@ -43,6 +44,7 @@ from cartogate.daemon.discovery import (
 )
 from cartogate.daemon.refresh import GitLazyRefresh, RefreshStrategy
 from cartogate.extract.pipeline import index_package
+from cartogate.mcp.present import SURFACE_VERSION
 from cartogate.mcp.tools import TOOL_SPECS, CartogateTools, dispatch
 from cartogate.store import InMemoryStore
 from cartogate.store.base import StoreInterface
@@ -50,6 +52,10 @@ from cartogate.surfaces import find_repo_root, looks_like_editor_install
 
 SERVER_NAME = "cartogate"
 _LOG = logging.getLogger("cartogate")
+
+#: Cap on an incoming tool NAME. Client-controlled and uncapped by the SDK; no real tool name
+#: comes close, so anything longer is junk input that must not reach an error message.
+_MAX_TOOL_NAME_LEN = 512
 
 #: A no-arg async function (``warm`` / ``refresh_once``).
 _AsyncFn = Callable[[], Coroutine[Any, Any, None]]
@@ -157,7 +163,23 @@ async def _repo_from_client_roots(session: Any) -> Path | None:
     """
     try:
         with anyio.fail_after(_ROOTS_TIMEOUT_S):
-            result = await session.list_roots()
+            # Deliberate use of a DEPRECATED capability (SEP-2577) -- the raw request,
+            # not the SDK's `session.list_roots()` courtesy wrapper. stdio handshakes
+            # only ever negotiate the legacy protocol versions, where roots/list still
+            # works and is the only ZERO-CONFIG per-window signal some editors give
+            # (Windsurf). The 2026-07-28 era removes it with NO server-side replacement
+            # -- there, context must come from the ladder's other rungs (workspace_root
+            # / set_workspace / env / registry): the transport raises NoBackChannelError
+            # and this rung degrades via the except below. The wrapper is skipped
+            # because its @deprecated warning would fire per session for a decision made
+            # on purpose,
+            # and suppressing it needs warnings.catch_warnings -- process-global state
+            # across an await, racy under the SDK's per-request task spawn (review
+            # Medium 2026-08-19). Revisit when the SDK pin leaves 2.x (the entry guard
+            # blocks 3.x) or a non-stdio transport lands.
+            result = await session.send_request(
+                types.ListRootsRequest(), types.ListRootsResult
+            )
     except Exception as exc:  # noqa: BLE001 — no roots support, or a slow/hung client; degrade
         _LOG.info("cartogate-mcp: roots/list unavailable (%s)", exc)
         return None
@@ -201,7 +223,7 @@ def _log_client_diagnostics(session: Any) -> None:
     if params is not None:
         _LOG.info(
             "cartogate-mcp: client=%s capabilities=%s",
-            getattr(params, "clientInfo", None), getattr(params, "capabilities", None),
+            getattr(params, "client_info", None), getattr(params, "capabilities", None),
         )
 
 
@@ -242,7 +264,7 @@ def _make_deferred_resolver(env: dict[str, str], cwd: Path) -> _DeferredResolver
 
 
 def _resolved_daemon_ready(repo: Path) -> bool:
-    """True if a *resolved*, SAME-VERSION daemon for ``repo`` is running and answering.
+    """True if a *resolved* daemon of the SAME VERSION AND RESULT SHAPE is running for ``repo``.
 
     Version-aware replacement is what makes package upgrades self-healing: a daemon still running
     OLDER code than this client (its files may even lock the venv against reinstall on Windows) is
@@ -256,10 +278,19 @@ def _resolved_daemon_ready(repo: Path) -> bool:
         health = daemon_client.health(repo)
     except daemon_client.DaemonUnavailableError:
         return False
-    if health.get("version") != cartogate.__version__:
+    # `surface` catches what the version cannot: an editable install's version does not change
+    # when its source does, so a daemon started before a change to the tool results would have
+    # its old-shape answers forwarded under this server's schemas. Daemons that predate the
+    # field report None and are replaced too.
+    if (
+        health.get("version") != cartogate.__version__
+        or health.get("surface") != SURFACE_VERSION
+    ):
         _LOG.info(
-            "cartogate-mcp: daemon for %s runs %s but this client is %s — replacing it",
-            repo, health.get("version"), cartogate.__version__,
+            "cartogate-mcp: daemon for %s runs %s (result shape %s) but this client is %s "
+            "(result shape %s) — replacing it",
+            repo, health.get("version"), health.get("surface"),
+            cartogate.__version__, SURFACE_VERSION,
         )
         _stop_daemon_process(info.pid, repo)
         _spawn_resolved_daemon(repo)  # fresh code warms in the background
@@ -318,9 +349,25 @@ def attach_repo_log_file(repo: Path) -> None:
         return
     try:
         log_file = ensure_state_dir(repo) / "mcp.log"
+        root = logging.getLogger()
+        # Idempotent by path: set_workspace can be called repeatedly (an agent re-pointing at the
+        # same root, a retargeting first call), and without this each one leaked another open
+        # FileHandler — a fd per call, and every later log line written once PER handler.
+        #
+        # Both sides are normalized the SAME way, which is load-bearing on Windows: FileHandler
+        # stores os.path.abspath(), which does NOT agree with Path.resolve() for 8.3 short names,
+        # drive-letter case, or junctions — comparing raw would silently no-op the dedup for any
+        # caller that hasn't already resolved its path.
+        target = os.path.normcase(str(log_file.resolve()))
+        if any(
+            isinstance(h, logging.FileHandler)
+            and os.path.normcase(str(Path(h.baseFilename).resolve())) == target
+            for h in root.handlers
+        ):
+            return
         handler = logging.FileHandler(log_file, encoding="utf-8")
         handler.setFormatter(_repo_log_formatter())
-        logging.getLogger().addHandler(handler)
+        root.addHandler(handler)
         _LOG.info("cartogate logs now also -> %s", log_file)
     except OSError as exc:
         _LOG.warning("cartogate: could not attach the repo log file (%s)", exc)
@@ -406,16 +453,112 @@ def _rss_mb() -> int | None:
 
 SET_WORKSPACE_TOOL = "set_workspace"
 
+#: Behavioural hints for the QUERY tools: they answer from the extracted graph and never run
+#: user code, so an agent can call them freely — nothing to undo, nothing to confirm, no
+#: repeat-call penalty. That is the point of the surface: a gate the agent avoids because it
+#: looks expensive or risky is a gate that doesn't fire (STRATEGY.md law 3). ``open_world`` is
+#: False because every answer comes from the local graph — no network, no external service.
+#:
+#: Deliberate call on ``read_only``: on the lazy server a first call may also write Cartogate's
+#: OWN bookkeeping — the graph snapshot, mcp.log, and the workspace registry — all inside the
+#: self-ignoring ``.cartogate/`` dir or ``CARTOGATE_HOME``, never the user's source. That is
+#: cache/telemetry maintenance, the same class as any caching read, so it stays read-only.
+#: Marking all of them non-read-only to cover it would destroy the "call me freely" property
+#: this whole annotation exists to create.
+_QUERY_ANNOTATIONS = types.ToolAnnotations(
+    read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+)
+
+#: ``contract_status`` is NOT a query: answering honestly means RUNNING the contract's declared
+#: ``run:`` checks, which are arbitrary user-supplied shell commands (``verify.evaluate`` ->
+#: ``subprocess.run(..., shell=True)``), plus a ``git write-tree`` that writes objects. It gets
+#: its own hints because hosts use ``read_only`` to AUTO-APPROVE calls without prompting the
+#: user, and auto-approving "run whatever this repo declares" is not a promise we can make.
+#: destructive: a check can be `make clean`. not idempotent: re-running has further effects.
+#: open_world: a check can reach the network.
+_CONTRACT_STATUS_ANNOTATIONS = types.ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True
+)
+
+#: ``set_workspace`` CHANGES server state (retargets the workspace and triggers an index), so it
+#: is not read-only. It is non-destructive (nothing is deleted) and idempotent — the same root
+#: twice lands in the same state, which :func:`attach_repo_log_file` upholds by refusing to
+#: attach a second handler for a path it is already logging to.
+_SET_WORKSPACE_ANNOTATIONS = types.ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+)
+
+#: Maps a spec's declared ``safety`` class to its MCP hints. Looked up WITHOUT a default, on
+#: purpose: a tool whose spec omits ``safety`` (or names a class that isn't here) raises KeyError
+#: at :func:`_tool_definitions` instead of silently inheriting the permissive read-only hints.
+#: That polarity matters — the safe-by-default version of this dict is how the ``contract_status``
+#: mislabel happened, and hosts auto-approve read-only calls without asking the user. Adding a
+#: tool must force this decision, the same way the required ``title`` key already does.
+_ANNOTATIONS_BY_SAFETY = {
+    "query": _QUERY_ANNOTATIONS,
+    "runs_user_code": _CONTRACT_STATUS_ANNOTATIONS,
+}
+
+#: The lazy server can answer a SUCCESSFUL call with a payload that is not the tool's dispatch
+#: result: "which workspace?" guidance, a `set_workspace` activation, first-index progress. Once a
+#: tool advertises an ``output_schema`` those payloads are validated against it too — the SDK
+#: client REJECTS any success result whose structured content doesn't conform — so every lazy
+#: tool's advertised schema is the union of its dispatch shape and this one. The anyOf gives the
+#: branch teeth (a session payload always carries ``ok`` or ``error``) without constraining the
+#: dispatch branch.
+_OPERATIONAL_RESULT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "A session payload instead of the tool's result: workspace-resolution guidance, a "
+        "set_workspace activation, or first-index progress. Follow `note`/`error`, then retry."
+    ),
+    "properties": {
+        "ok": {"type": "boolean"},
+        "status": {"type": "string", "description": "'indexing' while a first build runs."},
+        "repo": {"type": "string"},
+        "repo_id": {"type": "string"},
+        "nodes": {"type": "integer"},
+        "mode": {"type": "string", "description": "'daemon' or 'inproc'."},
+        "elapsed_s": {"type": "number"},
+        "note": {"type": "string"},
+        "error": {"type": "string"},
+        "action": {"type": "string", "description": "The tool to call to fix this."},
+        "known_workspaces": {"type": "array", "items": {"type": "string"}},
+    },
+    "anyOf": [{"required": ["ok"]}, {"required": ["error"]}],
+}
+
+
+#: The same session payload as the branch of every lazy tool's union: only the part with teeth
+#: (it carries ``ok`` or ``error``). The fully typed and described form above is advertised once,
+#: by ``set_workspace``; repeating its 782 bytes in seventeen unions cost 13 KB of the listing.
+#: The trade: a validating client no longer type-checks a session payload's fields here, and a
+#: tool result that wrongly carried a top-level ``ok`` or ``error`` would pass as one. No tool
+#: result has either key (the daemon's own ok/error envelope is unwrapped before forwarding).
+_OPERATIONAL_BRANCH: dict[str, Any] = {
+    "type": "object",
+    "anyOf": _OPERATIONAL_RESULT_SCHEMA["anyOf"],
+}
+
+
+def _with_operational_shapes(schema: dict[str, Any]) -> dict[str, Any]:
+    """A lazy-server output schema: the tool's own shape OR an operational session payload."""
+    return {"type": "object", "anyOf": [schema, _OPERATIONAL_BRANCH]}
+
+
 #: A server-control tool (only the lazy MCP server advertises it): the agent tells Cartogate which
 #: project it's in — the per-window signal an editor that gives no roots/workspace-env can't.
 _SET_WORKSPACE_DEF = types.Tool(
     name=SET_WORKSPACE_TOOL,
+    title="Set workspace",
+    annotations=_SET_WORKSPACE_ANNOTATIONS,
+    output_schema=_OPERATIONAL_RESULT_SCHEMA,
     description=(
         "Point Cartogate at the project you're working in. Call this ONCE with the absolute path "
         "the workspace/repository root when a Cartogate tool reports it couldn't determine the "
         "workspace. Cartogate then indexes that project and every other tool works for the session."
     ),
-    inputSchema={
+    input_schema={
         "type": "object",
         "properties": {
             "root": {"type": "string", "description": "Absolute path to the project/repo root."}
@@ -429,13 +572,13 @@ _SET_WORKSPACE_DEF = types.Tool(
 #: its workspace root ON the first tool call — one deterministic round trip, no failed call first.
 WORKSPACE_ROOT_PARAM = "workspace_root"
 
+#: Kept to one line on purpose: this schema is copied into EVERY lazy tool, so each word here is
+#: paid seventeen times in the tool listing. The server instructions carry the full explanation
+#: (why to pass it, and that set_workspace switches projects) once. It does not say "ignored
+#: afterwards": after an auto-resolved workspace a different root IS honoured.
 _WORKSPACE_ROOT_SCHEMA = {
     "type": "string",
-    "description": (
-        "Absolute path of the workspace/repository root you're working in. Pass this on your FIRST "
-        "Cartogate call of a session — some editors don't tell the server which project is open. "
-        "Ignored once the workspace is set (use set_workspace to switch projects)."
-    ),
+    "description": "Absolute path of the workspace root. Pass it on your first call.",
 }
 
 
@@ -460,16 +603,48 @@ def _tool_definitions(*, with_set_workspace: bool = False) -> list[types.Tool]:
     tools = [
         types.Tool(
             name=spec["name"],
+            title=spec["title"],
             description=spec["description"],
-            inputSchema=_with_workspace_root(spec["input_schema"])
+            annotations=_ANNOTATIONS_BY_SAFETY[spec["safety"]],
+            input_schema=_with_workspace_root(spec["input_schema"])
             if with_set_workspace
             else spec["input_schema"],
+            # The lazy server can answer with an operational payload instead of the dispatch
+            # result, so its advertised schema must admit both; the static server only ever
+            # serves dispatch results and advertises the exact shape.
+            output_schema=_with_operational_shapes(spec["output_schema"])
+            if with_set_workspace
+            else spec["output_schema"],
         )
         for spec in TOOL_SPECS
     ]
     if with_set_workspace:
         tools.append(_SET_WORKSPACE_DEF)
     return tools
+
+
+def _new_server(*, instructions: str | None = None) -> Server:
+    """A ``Server`` carrying Cartogate's identity.
+
+    ``version`` matters: it reaches the client in the initialize handshake, which is the one
+    place an agent (or a bug report) can see WHICH build answered. The SDK defaults it to an
+    empty string, which would silently drop the "an installed build always identifies its exact
+    commit" guarantee that ``cartogate --version`` and the mcp.log banner otherwise uphold.
+
+    No ``cache_hints`` here, and that is deliberate rather than an oversight: the SDK only
+    serializes ``ttlMs``/``cacheScope`` on protocol ``2026-07-28``, which is the stateless
+    per-request-envelope era reached via ``server/discover``. Cartogate serves stdio, whose only
+    entry is the ``initialize`` handshake, so that version can never be negotiated here and any
+    hint we set would be silently dropped on the wire. Revisit if a non-stdio transport lands.
+    (``tools/call`` would be ineligible regardless — the SDK's CacheableMethod set excludes it,
+    and tool results track the working tree, so they must never be cached.)
+    """
+    return Server(
+        SERVER_NAME,
+        version=cartogate.__version__,
+        title="Cartogate",
+        instructions=instructions,
+    )
 
 
 def _register_static_handlers(
@@ -486,32 +661,50 @@ def _register_static_handlers(
     tools), which doubles as useful orientation for the agent. None of these touch the warm graph,
     so they stay instant."""
 
-    @server.list_tools()
-    async def _list_tools() -> list[types.Tool]:
-        return _tool_definitions(with_set_workspace=with_set_workspace)
+    async def _list_tools(
+        ctx: ServerRequestContext[Any, Any], params: types.PaginatedRequestParams,
+    ) -> types.ListToolsResult:
+        tools = _tool_definitions(with_set_workspace=with_set_workspace)
+        return types.ListToolsResult(tools=tools)
 
-    @server.list_resources()
-    async def _list_resources() -> list[types.Resource]:
-        return [
+    async def _list_resources(
+        ctx: ServerRequestContext[Any, Any], params: types.PaginatedRequestParams,
+    ) -> types.ListResourcesResult:
+        resources = [
             types.Resource(
-                uri=AnyUrl("cartogate://status"),
+                uri="cartogate://status",
                 name="Cartogate status",
                 description="Current workspace, serving mode, and the available tools.",
-                mimeType="application/json",
+                mime_type="application/json",
             )
         ]
+        return types.ListResourcesResult(resources=resources)
 
-    @server.read_resource()
-    async def _read_resource(_uri: AnyUrl) -> str:
+    async def _read_resource(
+        ctx: ServerRequestContext[Any, Any], params: types.ReadResourceRequestParams,
+    ) -> types.ReadResourceResult:
         # Served for ANY requested URI: clients ask for their own spellings (Windsurf's @mention
         # reads mcp://cartogate) and an error here reads as a broken server to the user.
         payload: dict[str, Any] = status() if status is not None else {"server": SERVER_NAME}
         payload.setdefault("tools", [str(spec["name"]) for spec in TOOL_SPECS])
-        return json.dumps(payload, indent=2)
+        text = json.dumps(payload, indent=2)
+        return types.ReadResourceResult(
+            contents=[
+                types.TextResourceContents(
+                    uri=params.uri, mime_type="application/json", text=text,
+                )
+            ]
+        )
 
-    @server.list_prompts()
-    async def _list_prompts() -> list[types.Prompt]:
-        return []
+    async def _list_prompts(
+        ctx: ServerRequestContext[Any, Any], params: types.PaginatedRequestParams,
+    ) -> types.ListPromptsResult:
+        return types.ListPromptsResult(prompts=[])
+
+    server.add_request_handler("tools/list", types.PaginatedRequestParams, _list_tools)
+    server.add_request_handler("resources/list", types.PaginatedRequestParams, _list_resources)
+    server.add_request_handler("resources/read", types.ReadResourceRequestParams, _read_resource)
+    server.add_request_handler("prompts/list", types.PaginatedRequestParams, _list_prompts)
 
 
 def build_server(store: StoreInterface, *, refresh: RefreshStrategy | None = None) -> Server:
@@ -524,11 +717,16 @@ def build_server(store: StoreInterface, *, refresh: RefreshStrategy | None = Non
     ``refresh`` the store is static (used by tests).
     """
     state = {"tools": CartogateTools(store)}
-    server: Server = Server(SERVER_NAME)
+    server: Server = _new_server()
     _register_static_handlers(server)
+    validate_arguments = _argument_validator()
 
-    @server.call_tool()
-    async def _call_tool(name: str, arguments: dict[str, object]) -> list[types.TextContent]:
+    async def _call_tool(
+        ctx: ServerRequestContext[Any, Any], params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        rejected = validate_arguments(params.name, dict(params.arguments or {}))
+        if rejected is not None:
+            return rejected
         if refresh is not None:
             new_store = await anyio.to_thread.run_sync(refresh.maybe_refresh)
             if new_store is not None:  # the tree changed — serve the rebuilt graph from now on
@@ -536,9 +734,14 @@ def build_server(store: StoreInterface, *, refresh: RefreshStrategy | None = Non
         tools = state["tools"]
         # Run the (possibly heavy: find_cycles, blast_radius on a big graph) query in a worker
         # thread so it never blocks the event loop — the server stays responsive to other calls.
-        result = await anyio.to_thread.run_sync(dispatch, tools, name, arguments)
-        return [types.TextContent(type="text", text=json.dumps(result))]
+        result = await anyio.to_thread.run_sync(
+            dispatch, tools, params.name, params.arguments or {}
+        )
+        return _json_result(result)
 
+    server.add_request_handler(
+        "tools/call", types.CallToolRequestParams, _guard_tool_errors(_call_tool)
+    )
     return server
 
 
@@ -549,9 +752,114 @@ def load_warm_store(repo: Path, *, repo_id: str) -> InMemoryStore:
     return store
 
 
-def _text_result(obj: object) -> list[types.TextContent]:
+def _text_result(obj: object) -> list[types.ContentBlock]:
     """A tool result carrying a JSON object as text (the MCP tool-result shape)."""
-    return [types.TextContent(type="text", text=json.dumps(obj))]
+    # Separator-free: a host that forwards this text block to its model pays for every character,
+    # and json.dumps' default ", " / ": " are about 4% of a typical result.
+    return [types.TextContent(type="text", text=json.dumps(obj, separators=(",", ":")))]
+
+
+def _json_result(payload: dict[str, Any]) -> types.CallToolResult:
+    """A SUCCESSFUL tool result, dual-emitted: the JSON text block every client understands plus
+    ``structured_content`` for schema-aware 2.x clients — the same payload in both channels, so a
+    structured client and a text-only client never see different answers.
+
+    Every success path must come through here once a tool advertises an ``output_schema``: the
+    SDK client rejects a success result whose structured content is absent. Error results
+    (``is_error=True``) stay on :func:`_text_result` — the spec exempts them from the schema.
+    """
+    return types.CallToolResult(content=_text_result(payload), structured_content=payload)
+
+
+def _argument_validator(
+    *, with_set_workspace: bool = False
+) -> Callable[[str, dict[str, Any]], types.CallToolResult | None]:
+    """Build this server's ``(name, arguments) -> error result | None`` schema check.
+
+    mcp 1.x validated every ``tools/call`` against the tool's advertised ``inputSchema``
+    before the handler ran. 2.0 dropped per-tool validation — only the JSON-RPC envelope is
+    model-validated — so without this an ill-typed argument reaches ``dispatch``, gets
+    discarded by a downstream isinstance guard, and the call returns *success*: a silently
+    served bad call where there used to be a rejection. Validating here restores the 1.x
+    contract at the one place every tool call passes through.
+
+    The schema index is built once per server from :func:`_tool_definitions`, so the check
+    can't drift from what ``tools/list`` advertises.
+    """
+    # Compiled once, not per call: `jsonschema.validate()` re-runs check_schema and rebuilds the
+    # validator every time (~0.4-1.3 ms/call against the 50 ms p95 budget). Compiling here also
+    # moves a malformed schema's SchemaError to server build, where it's a startup failure we
+    # control, instead of an uncaught exception on some later tool call.
+    validators: dict[str, Any] = {}
+    for tool in _tool_definitions(with_set_workspace=with_set_workspace):
+        schema = tool.input_schema
+        validator_cls = jsonschema.validators.validator_for(schema)
+        validator_cls.check_schema(schema)
+        validators[tool.name] = validator_cls(schema)
+
+    def _check(name: str, arguments: dict[str, Any]) -> types.CallToolResult | None:
+        validator = validators.get(name)
+        if validator is None:
+            return None  # unknown tool — dispatch owns that error path, unchanged
+        try:
+            validator.validate(arguments)
+        except jsonschema.ValidationError as exc:
+            msg = f"invalid arguments for '{name}': {exc.message}"
+            # Truncated in the log only: jsonschema embeds the offending VALUE in its message,
+            # so a megabyte-sized bad argument would otherwise land whole in the unrotated
+            # mcp.log. The client still gets the full message, as it did under 1.x.
+            _LOG.warning("cartogate-mcp: %s", msg[:500])
+            return types.CallToolResult(content=_text_result({"error": msg}), is_error=True)
+        return None
+
+    return _check
+
+
+#: A ``tools/call`` handler: ``(ctx, params) -> CallToolResult``.
+_ToolHandler = Callable[
+    [ServerRequestContext[Any, Any], types.CallToolRequestParams],
+    Coroutine[Any, Any, types.CallToolResult],
+]
+
+
+def _guard_tool_errors(handler: _ToolHandler) -> _ToolHandler:
+    """Turn an escaping handler exception into an ``is_error`` result, as mcp 1.x did.
+
+    The 1.x ``@server.call_tool()`` decorator wrapped every handler in
+    ``except Exception -> CallToolResult(isError=True)``. 2.0's ``add_request_handler`` has no
+    such net, so an exception becomes a JSON-RPC *protocol* error instead — which reads to the
+    agent as a broken server rather than a failed tool, and diverges from the daemon surface,
+    which returns a structured error for the same conditions (``dispatch``'s "unknown tool",
+    a tool method raising, a non-serializable result). Restores the 1.x contract.
+    """
+
+    @functools.wraps(handler)
+    async def _guarded(
+        ctx: ServerRequestContext[Any, Any], params: types.CallToolRequestParams
+    ) -> types.CallToolResult:
+        if len(params.name) > _MAX_TOOL_NAME_LEN:
+            # Bounded at the SOURCE, not just where it's logged: the name is client-controlled and
+            # uncapped by the SDK, and `dispatch` embeds it in its "unknown tool" error — which
+            # `_LOG.exception` then renders IN THE TRACEBACK, where a downstream truncation can't
+            # reach. mcp.log is unrotated and lives in the user's repo, so an agent looping on
+            # junk calls would otherwise fill the disk. No real tool name approaches this.
+            _LOG.warning("cartogate-mcp: rejected a %d-char tool name", len(params.name))
+            return types.CallToolResult(
+                content=_text_result({"error": "tool name too long"}), is_error=True
+            )
+        try:
+            return await handler(ctx, params)
+        except Exception as exc:  # noqa: BLE001 — parity with the 1.x decorator's catch-all
+            # Both truncated: the tool NAME is client-controlled and uncapped by the SDK, and it
+            # reaches the log twice (the format arg, then again inside the traceback's exception
+            # line). mcp.log is unrotated and lives in the user's repo, so an agent looping on
+            # bad calls would otherwise be a disk-fill vector.
+            _LOG.exception("cartogate-mcp: tool %r failed", params.name[:200])
+            return types.CallToolResult(
+                content=_text_result({"error": str(exc)[:2000]}), is_error=True
+            )
+
+    return _guarded
 
 
 async def _bounded_prime(refresh: Any) -> tuple[dict[str, Any], float]:
@@ -705,7 +1013,7 @@ def build_lazy_server(
         "the workspace and runs in one step. Alternatively call `set_workspace` once. Every tool "
         "then operates on that project."
     ) if refresh is None else None
-    server: Server = Server(SERVER_NAME, instructions=instructions)
+    server: Server = _new_server(instructions=instructions)
 
     def _status() -> dict[str, Any]:
         """Live orientation for the resource surface (an @cartogate mention reads this)."""
@@ -725,6 +1033,7 @@ def build_lazy_server(
         }
 
     _register_static_handlers(server, with_set_workspace=True, status=_status)
+    validate_arguments = _argument_validator(with_set_workspace=True)
 
     async def _activate(root_arg: object) -> dict[str, object]:
         """Point the session at a workspace root; the shared core of ``set_workspace`` and the
@@ -846,15 +1155,22 @@ def build_lazy_server(
                 "note": "first index of this repo is still building — retry in ~30 seconds",
             }
 
-    @server.call_tool()
-    async def _call_tool(name: str, arguments: dict[str, object]) -> list[types.TextContent]:
+    async def _call_tool(
+        ctx: ServerRequestContext[Any, Any], params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        name = params.name
+        arguments = dict(params.arguments or {})
+        # we may strip the self-config param; don't mutate the SDK dict
+        rejected = validate_arguments(name, arguments)  # before workspace_root is popped
+        if rejected is not None:
+            return rejected
         if name == SET_WORKSPACE_TOOL:  # server-control tool: (re)target the workspace, then index
-            return _text_result(await _activate(arguments.get("root")))
-        arguments = dict(arguments)  # we may strip the self-config param; don't mutate the SDK dict
+            activation_result = await _activate(arguments.get("root"))
+            return _json_result(dict(activation_result))
         root_arg = arguments.pop(WORKSPACE_ROOT_PARAM, None)
         pending_status = await _poll_indexing()  # commit/report a detached first build FIRST
         if pending_status is not None:
-            return _text_result(pending_status)
+            return _json_result(pending_status)
         retarget = False
         if isinstance(root_arg, str) and root_arg.strip():
             if state["refresh"] is None:
@@ -872,13 +1188,13 @@ def build_lazy_server(
             # serve the requested tool below.
             activation = await _activate(root_arg)
             if activation.get("status") == "indexing":  # detached — report, don't block/serve
-                return _text_result(activation)
+                return _json_result(dict(activation))
             if not activation.get("ok"):
-                return _text_result(
+                return _json_result(
                     {"error": f"workspace_root rejected: {activation.get('error')}",
                      "action": SET_WORKSPACE_TOOL}
                 )
-        async def _forward_to_daemon() -> list[types.TextContent] | None:
+        async def _forward_to_daemon() -> dict[str, Any] | None:
             """Forward to the warm resolved daemon; ``None`` = daemon lost (flag flipped off)."""
             try:
                 result = await anyio.to_thread.run_sync(
@@ -887,7 +1203,7 @@ def build_lazy_server(
                     )
                 )
                 _LOG.info("tool %s -> daemon", name)
-                return [types.TextContent(type="text", text=json.dumps(result))]
+                return dict(result)
             except daemon_client.DaemonUnavailableError as exc:
                 daemon_on[0] = False  # the daemon went away — serve in-process from here on
                 _LOG.warning("daemon unavailable (%s); serving in-process for the session", exc)
@@ -896,20 +1212,19 @@ def build_lazy_server(
         if daemon_on[0]:  # forward to the warm resolved daemon (shared graph)
             forwarded = await _forward_to_daemon()
             if forwarded is not None:
-                return forwarded
+                return _json_result(forwarded)
 
-        session = None
-        # request_context is a ContextVar set per-request; .get() raises LookupError outside one.
-        # If it's ever absent inside a real call, session stays None -> deferred resolve is skipped
-        # and the actionable error is returned (safe degradation, never a crash).
-        with contextlib.suppress(LookupError):
-            session = server.request_context.session
+        # ``ctx`` is the per-request ServerRequestContext the runner builds for every inbound
+        # message; ``.session`` is the connection-scoped ServerSession that carries
+        # server-to-client requests — here, the ``roots/list`` call the deferred workspace
+        # resolver makes (see ``_repo_from_client_roots``). Always present on a real request.
+        session = ctx.session
         await warm(session)  # build the graph (resolving the workspace first if deferred)
         if daemon_on[0]:
             # warm() resolved the workspace (roots/registry) and found its live daemon — forward.
             forwarded = await _forward_to_daemon()
             if forwarded is not None:
-                return forwarded
+                return _json_result(forwarded)
             await warm(session)  # the daemon died in the same instant — build in-process (bounded)
         tools = state["tools"]
         if tools is None:
@@ -917,7 +1232,7 @@ def build_lazy_server(
             # not the misleading "unknown workspace" error below.
             pending_status = await _poll_indexing()
             if pending_status is not None:
-                return _text_result(pending_status)
+                return _json_result(pending_status)
             tools = state["tools"]  # the poll may have committed a finished build — serve it
         if tools is None:  # deferred resolution failed — tell the agent how to fix it, don't hang
             msg = (
@@ -933,14 +1248,17 @@ def build_lazy_server(
             live = await anyio.to_thread.run_sync(registry.live_daemon_workspaces)
             if len(live) > 1:
                 payload["known_workspaces"] = [str(p) for p in live]
-            return _text_result(payload)
+            return _json_result(payload)
         # Run the query in a worker thread (so it never blocks the event loop) against the CURRENT
         # graph — never a synchronous rebuild. Background refresh keeps the graph fresh out of band.
         t0 = time.monotonic()
         result = await anyio.to_thread.run_sync(dispatch, tools, name, arguments)
         _LOG.info("tool %s -> %.3fs (in-process)", name, time.monotonic() - t0)
-        return [types.TextContent(type="text", text=json.dumps(result))]
+        return _json_result(result)
 
+    server.add_request_handler(
+        "tools/call", types.CallToolRequestParams, _guard_tool_errors(_call_tool)
+    )
     return server, warm, refresh_once
 
 

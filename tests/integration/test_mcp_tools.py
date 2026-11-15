@@ -8,6 +8,8 @@ import pytest
 
 from cartogate.extract.pipeline import index_package
 from cartogate.mcp.tools import TOOL_SPECS, CartogateTools, dispatch
+from cartogate.schema.enums import Confidence, Language, NodeKind, Provenance, Visibility
+from cartogate.schema.nodes import Location, Node
 from cartogate.store import InMemoryStore
 
 FIXTURE_ROOT = Path(__file__).parent.parent / "fixtures" / "sample_pkg"
@@ -200,3 +202,290 @@ def test_dispatch_routes_localize() -> None:
     # Smoke: the localize route resolves and returns a well-formed report (no diff -> no suspects).
     out = dispatch(_tools(), "localize", {"test": "sample_pkg.auth.authenticate"})
     assert out["found"] is True and out["count"] == 0 and "depth_searched" in out
+
+
+# --- check_duplicate when the caller names no language ---------------------------------------
+# The tool defaults `language` to python, so a TypeScript or Go signature checked without that
+# argument searched only the Python table and came back with a silent all-clear.
+
+FIXTURES = Path(__file__).parent.parent / "fixtures"
+
+
+def _function(qualified_name: str, unit: str, signature: str, language: Language) -> Node:
+    return Node.create(
+        repo_id="poly",
+        qualified_name=qualified_name,
+        kind=NodeKind.SYMBOL,
+        name=qualified_name.rsplit(".", 1)[-1],
+        unit=unit,
+        signature=signature,
+        location=Location(path=unit, start_line=1, end_line=3),
+        visibility=Visibility.EXPORTED,
+        provenance=Provenance.TREE_SITTER,
+        confidence=Confidence.EXTRACTED,
+        content_hash=qualified_name,
+        language=language,
+        is_top_level=True,
+    )
+
+
+def _polyglot_tools() -> CartogateTools:
+    """One exported top-level function per language, each alone in its own file."""
+    functions = [
+        ("web.dates.formatDate", "web/dates.ts", "formatDate(d: Date)", Language.TYPESCRIPT),
+        ("svc.Parse", "svc/parse.go", "Parse(data []byte)", Language.GO),
+        ("core.load", "core/load.rs", "load(path: &str)", Language.RUST),
+        ("app.slug.slugify", "app/slug.py", "def slugify(text):", Language.PYTHON),
+    ]
+    store = InMemoryStore()
+    store.bulk_load(
+        (unit, [_function(qname, unit, signature, language)], [])
+        for qname, unit, signature, language in functions
+    )
+    return CartogateTools(store)
+
+
+@pytest.mark.parametrize(
+    ("signature", "language", "existing", "location"),
+    [
+        ("function formatDate(d: Date)", "typescript", "web.dates.formatDate", "web/dates.ts:1"),
+        ("func Parse(data []byte) (*Node, error)", "go", "svc.Parse", "svc/parse.go:1"),
+        ("pub const fn load(path: &str) -> Node", "rust", "core.load", "core/load.rs:1"),
+    ],
+)
+def test_a_duplicate_in_another_language_is_reported_not_blocked_when_none_is_named(
+    signature: str, language: str, existing: str, location: str
+) -> None:
+    result = dispatch(_polyglot_tools(), "check_duplicate", {"signature": signature})
+
+    assert result["blocked"] is False and result["language"] == "python"
+    assert result["near_match"]["qualified_name"] == existing
+    assert result["near_match"]["location"] == location
+    assert result["near_match"]["language"] == language
+    assert f"language='{language}'" in result["note"]
+
+
+@pytest.mark.parametrize(
+    ("signature", "language", "existing"),
+    [
+        ("function formatDate(d: Date)", "typescript", "web.dates.formatDate"),
+        ("func Parse(data []byte) (*Node, error)", "go", "svc.Parse"),
+        ("pub const fn load(path: &str) -> Node", "rust", "core.load"),
+        ("def slugify(text):", "python", "app.slug.slugify"),
+    ],
+)
+def test_naming_the_language_blocks_the_duplicate(
+    signature: str, language: str, existing: str
+) -> None:
+    result = dispatch(
+        _polyglot_tools(), "check_duplicate", {"signature": signature, "language": language}
+    )
+
+    assert result["blocked"] is True and result["language"] == language
+    assert result["existing_qualified_name"] == existing and "note" not in result
+
+
+def test_a_named_language_is_not_second_guessed() -> None:
+    result = dispatch(
+        _polyglot_tools(),
+        "check_duplicate",
+        {"signature": "function formatDate(d: Date)", "language": "python"},
+    )
+
+    assert result["blocked"] is False and result["language"] == "python"
+    assert result["near_match"] is None and "note" not in result
+
+
+def test_python_stays_the_default_and_still_blocks() -> None:
+    result = dispatch(_polyglot_tools(), "check_duplicate", {"signature": "def slugify(text):"})
+
+    assert result["blocked"] is True and result["language"] == "python"
+    assert result["existing_qualified_name"] == "app.slug.slugify" and "note" not in result
+
+
+def test_a_python_duplicate_outranks_a_match_in_another_language() -> None:
+    store = InMemoryStore()
+    store.bulk_load(
+        [
+            ("a.py", [_function("a.run", "a.py", "def run():", Language.PYTHON)], []),
+            ("b.go", [_function("b.run", "b.go", "run()", Language.GO)], []),
+        ]
+    )
+
+    result = dispatch(CartogateTools(store), "check_duplicate", {"signature": "def run():"})
+
+    assert result["blocked"] is True and result["existing_qualified_name"] == "a.run"
+
+
+def test_a_new_signature_is_clear_in_every_language() -> None:
+    tools = _polyglot_tools()
+
+    result = dispatch(tools, "check_duplicate", {"signature": "def brand_new(z):"})
+
+    assert result == tools.check_duplicate("def brand_new(z):", language="python")
+    assert result["blocked"] is False and result["near_match"] is None and "note" not in result
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["sample_ts", "sample_go", "sample_rust", "sample_c", "sample_kotlin", "sample_swift"],
+)
+def test_every_indexed_function_is_found_with_and_without_its_language(fixture: str) -> None:
+    """Over really-indexed code, in the signature form the index stores: naming the language
+    blocks on the symbol itself, and leaving it out is never a silent all-clear."""
+    store = InMemoryStore()
+    indexed = index_package(FIXTURES / fixture, repo_id="t", store=store, resolve=False)
+    tools = CartogateTools(store)
+    functions = [
+        n
+        for n in indexed.nodes
+        if n.kind is NodeKind.SYMBOL and n.is_top_level and n.signature and not n.is_type_decl
+    ]
+    assert functions, f"{fixture} must define top-level functions"
+
+    for node in functions:
+        named = tools.check_duplicate(node.signature, language=node.language.value)
+        unnamed = tools.check_duplicate(node.signature)
+
+        assert named["blocked"] is True and named["language"] == node.language.value
+        assert unnamed["blocked"] is False and unnamed["language"] == "python"
+        assert unnamed["near_match"]["language"] == node.language.value, node.signature
+
+
+def test_the_check_duplicate_spec_says_what_an_unnamed_language_does() -> None:
+    spec = next(s for s in TOOL_SPECS if s["name"] == "check_duplicate")
+    language = spec["input_schema"]["properties"]["language"]
+    output = spec["output_schema"]["properties"]
+
+    assert language["default"] == "python" and "near_match" in language["description"]
+    assert spec["input_schema"]["required"] == ["signature"]
+    assert output["language"] == {"type": "string"} and output["note"] == {"type": "string"}
+    assert output["near_match"]["properties"]["language"] == {"type": "string"}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"signature": "function formatDate(d: Date)"},
+        {"signature": "function formatDate(d: Date)", "language": "typescript"},
+        {"signature": "def slugify(text):"},
+        {"signature": "def brand_new(z):"},
+    ],
+)
+def test_check_duplicate_results_validate_against_the_advertised_schema(
+    arguments: dict[str, str],
+) -> None:
+    import jsonschema
+
+    from cartogate.mcp.server import _with_operational_shapes
+
+    spec = next(s for s in TOOL_SPECS if s["name"] == "check_duplicate")
+    result = dispatch(_polyglot_tools(), "check_duplicate", dict(arguments))
+
+    jsonschema.validate(result, spec["output_schema"])
+    jsonschema.validate(result, _with_operational_shapes(spec["output_schema"]))
+
+
+def test_an_unknown_language_is_still_an_error() -> None:
+    with pytest.raises(ValueError, match="cobol"):
+        _polyglot_tools().check_duplicate("def f():", language="cobol")
+
+
+# --- findings from the Task 6 review ---------------------------------------------------------
+
+
+def _same_name_in(*languages: Language) -> CartogateTools:
+    """A store holding ``validate(name)`` once per given language, each in its own file."""
+    store = InMemoryStore()
+    store.bulk_load(
+        (
+            f"v.{language.value}",
+            [
+                _function(
+                    f"{language.value}.validate", f"v.{language.value}", "validate(name)", language
+                )
+            ],
+            [],
+        )
+        for language in languages
+    )
+    return CartogateTools(store)
+
+
+def test_the_note_names_every_language_that_matched_not_just_the_first() -> None:
+    """Go's ``validate(name string)`` and Swift's ``validate(name: String)`` normalise alike, so
+    an unnamed check cannot tell which the caller is writing. The note must not pick one."""
+    tools = _same_name_in(Language.SWIFT, Language.GO)
+
+    result = tools.check_duplicate("func validate(name: String) -> Bool")
+
+    assert result["blocked"] is False
+    assert result["near_match"]["language"] == "go"  # first in the enum's order
+    assert "go, swift" in result["note"] and "language='go'" not in result["note"]
+
+
+def test_a_single_matching_language_is_named_as_the_one_to_pass() -> None:
+    result = _same_name_in(Language.SWIFT).check_duplicate("func validate(name: String) -> Bool")
+
+    assert result["near_match"]["language"] == "swift" and "language='swift'" in result["note"]
+
+
+def test_every_near_match_says_which_language_it_is_in() -> None:
+    """A type declaration matched by signature alone is a near match in the checked language."""
+    store = InMemoryStore()
+    indexed = index_package(FIXTURES / "sample_pkg", repo_id="t", store=store, resolve=False)
+    tools = CartogateTools(store)
+    classes = [n for n in indexed.nodes if n.kind is NodeKind.SYMBOL and n.is_type_decl]
+    assert classes, "the Python fixture must declare a class"
+
+    result = tools.check_duplicate(classes[0].signature, language="python")
+
+    assert result["blocked"] is False
+    assert result["near_match"]["qualified_name"] == classes[0].qualified_name
+    assert result["near_match"]["language"] == "python"
+
+
+def test_a_python_near_match_does_not_hide_a_match_in_another_language() -> None:
+    store = InMemoryStore()
+    indexed = index_package(FIXTURES / "sample_pkg", repo_id="t", store=store, resolve=False)
+    python_class = next(n for n in indexed.nodes if n.kind is NodeKind.SYMBOL and n.is_type_decl)
+    store.upsert_unit(
+        "Model.kt",
+        [_function("kt.Model", "Model.kt", python_class.signature, Language.KOTLIN)],
+        [],
+    )
+
+    result = CartogateTools(store).check_duplicate(python_class.signature)
+
+    assert result["blocked"] is False and result["near_match"]["language"] == "python"
+    assert "kotlin" in result["note"]
+
+
+def test_the_edited_file_is_excluded_from_the_scan_of_other_languages() -> None:
+    tools = _same_name_in(Language.GO)
+
+    edited = tools.check_duplicate("validate(name)", exclude_unit="v.go")
+    elsewhere = tools.check_duplicate("validate(name)", exclude_unit="other.go")
+
+    assert edited["near_match"] is None and "note" not in edited
+    assert elsewhere["near_match"]["language"] == "go"
+
+
+def test_no_stored_signature_gets_a_silent_all_clear_in_a_polyglot_repository() -> None:
+    """All eleven fixture languages indexed together: every function and type, checked in the
+    form the index stores it and with no language named, is blocked (Python) or reported."""
+    store = InMemoryStore()
+    indexed = index_package(FIXTURES, repo_id="fx", store=store, resolve=False)
+    tools = CartogateTools(store)
+    symbols = [
+        n for n in indexed.nodes if n.kind is NodeKind.SYMBOL and n.is_top_level and n.signature
+    ]
+    assert len({n.language for n in symbols}) >= 10
+
+    for node in symbols:
+        result = tools.check_duplicate(node.signature)
+        assert result["blocked"] or result["near_match"] is not None, (
+            node.language,
+            node.signature,
+        )
+        assert result["blocked"] is False or result["language"] == "python"

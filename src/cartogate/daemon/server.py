@@ -32,6 +32,7 @@ from cartogate import __version__
 from cartogate.daemon.protocol import ProtocolError, build_error, build_ok, decode, encode
 from cartogate.daemon.refresh import RefreshStrategy
 from cartogate.instrument import SpanRecorder
+from cartogate.mcp.present import SURFACE_VERSION
 from cartogate.mcp.tools import TOOL_SPECS, CartogateTools, dispatch
 from cartogate.store import InMemoryStore
 
@@ -167,6 +168,7 @@ class DaemonServer:
             "repo": str(self._root),
             "repo_id": self._repo_id,
             "version": __version__,
+            "surface": SURFACE_VERSION,
             "pid": os.getpid(),
             "uptime_s": round(time.monotonic() - self._started_at, 1),
             "nodes": len(store.visible_node_ids()) if store is not None else 0,

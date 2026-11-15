@@ -10,7 +10,7 @@ never blocks).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,8 @@ from cartogate.engine.localize import DEFAULT_MAX_DEPTH
 from cartogate.engine.localize import localize as _localize
 from cartogate.engine.pdg import build_pdg as _build_pdg
 from cartogate.engine.traversal import REFERENCE_EDGE_TYPES, GatingTraversal
+from cartogate.mcp.budget import DEFAULT_LIMIT
+from cartogate.mcp.present import present
 from cartogate.schema.enums import Confidence, EdgeType, Language, NodeKind, Visibility
 from cartogate.schema.nodes import Node
 from cartogate.store.base import Direction, StoreInterface
@@ -58,10 +60,103 @@ _EXTERNALS_UNIT = "<externals>"
 GATE_HISTORY_DEFAULT = 20
 GATE_HISTORY_MAX = 50
 
-#: JSON-Schema tool definitions (name/description/input schema) for ``list_tools``.
+# --- Output-schema fragments -----------------------------------------------------------------
+# Shared shapes for the ``output_schema`` each spec declares. These are load-bearing contracts,
+# not documentation: the 2.x SDK client REJECTS any successful call whose structured content is
+# missing or non-conforming once a schema is advertised. Two safety rules keep that risk down:
+# ``required`` names only keys EVERY return path of the tool emits, and ``additionalProperties``
+# is never set to false — a new optional field must not break existing validating clients.
+
+_NULL_STR: dict[str, Any] = {"type": ["string", "null"]}
+_STR_LIST: dict[str, Any] = {"type": "array", "items": {"type": "string"}}
+_INT_LIST: dict[str, Any] = {"type": "array", "items": {"type": "integer"}}
+
+#: A dependent's row as an MCP caller receives it (``mcp/present.py`` reshapes ``_node_brief``):
+#: the file path appears once, in ``location``; ``signature`` only where rows share a name.
+_NODE_BRIEF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "qualified_name": {"type": "string"},
+        "kind": {"type": "string"},
+        "location": {"type": "string", "description": "path:line"},
+        "signature": {"type": "string", "description": "Only on overloads."},
+    },
+    "required": ["qualified_name", "kind", "location"],
+}
+
+#: The row above + its call sites as line numbers in that same file (``find_references``).
+_NODE_BRIEF_WITH_SITES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        **_NODE_BRIEF_SCHEMA["properties"],
+        "lines": {**_INT_LIST, "description": "Call-site lines in this row's file."},
+        "more_lines": {"type": "integer"},
+        "sites": {**_STR_LIST, "description": "path:line of a site in another file."},
+        "more_sites": {"type": "integer"},
+    },
+    "required": [*_NODE_BRIEF_SCHEMA["required"], "lines"],
+}
+
+#: Paging keys every paged tool result may carry (``mcp/budget.py``): ``count`` stays the true
+#: total; these say how many rows came back, whether more follow, and — when rows were cut —
+#: which files all the matches are in.
+_PAGE_PROPS: dict[str, Any] = {
+    "returned": {"type": "integer"},
+    "truncated": {"type": "boolean"},
+    "next_offset": {"type": "integer"},
+    "units": _STR_LIST,
+    "unit_count": {"type": "integer"},
+}
+
+#: The optional paging arguments of every paged tool. There is deliberately no ``maximum``: a
+#: ``limit`` above the cap is clamped (the result's ``returned`` shows it) instead of failing the
+#: whole call at argument validation — an optional knob is not worth a wasted round trip.
+_LIMIT_ARG: dict[str, Any] = {"type": "integer", "minimum": 1, "default": DEFAULT_LIMIT}
+_PAGING_ARGS: dict[str, Any] = {
+    "limit": _LIMIT_ARG,
+    # No "default": an absent offset obviously starts at the first row, and the key is repeated
+    # in every paged tool of the listing.
+    "offset": {"type": "integer", "minimum": 0},
+}
+
+#: One flagged test (``suggest_tests`` / ``impact_summary``): FlagReport's item shape.
+_FLAGGED_TEST_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "qualified_name": {"type": "string"},
+        "unit": {"type": "string"},
+        "exercises": _STR_LIST,
+        "more_exercises": {"type": "integer"},
+    },
+    "required": ["qualified_name", "unit", "exercises"],
+}
+
+#: One flagged doc (``doc_drift`` / ``impact_summary``): DocReport's item shape.
+_FLAGGED_DOC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string"},
+        "unit": {"type": "string"},
+        "mentions": _STR_LIST,
+        "more_mentions": {"type": "integer"},
+    },
+    "required": ["path", "unit", "mentions"],
+}
+
+#: ``changed_count`` / ``unresolved_count``: present only when the list that echoes the caller's
+#: input (``changed``, ``unresolved_symbols``) was cut, and then its true size.
+_ECHO_COUNT: dict[str, Any] = {"type": "integer"}
+
+#: Input name -> candidate full names, for the names that didn't resolve.
+_UNRESOLVED_SCHEMA: dict[str, Any] = {"type": "object", "additionalProperties": _STR_LIST}
+
+
+#: JSON-Schema tool definitions (name/description/input/output schema) for ``list_tools``.
 TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "check_duplicate",
+        "safety": "query",
+        "title": "Check for duplicate symbol",
         "description": (
             "Before creating a function/class, check whether a symbol with the same "
             "signature already exists. Returns the existing symbol if so (reuse it)."
@@ -78,14 +173,49 @@ TOOL_SPECS: list[dict[str, Any]] = [
                     "enum": ["python", "typescript", "java", "go", "rust", "javascript", "csharp",
                              "c", "cpp", "kotlin", "swift"],
                     "default": "python",
-                    "description": "Source language (the gate is scoped per language).",
+                    "description": (
+                        "Source language. Without it the check runs as python and a match in "
+                        "another language comes back as `near_match`, not blocked."
+                    ),
                 },
             },
             "required": ["signature"],
         },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "blocked": {"type": "boolean"},
+                "language": {"type": "string"},
+                "kind": {"type": "string"},
+                "reason": {"type": "string"},
+                "existing_symbol_id": _NULL_STR,
+                "existing_qualified_name": _NULL_STR,
+                "existing_location": _NULL_STR,
+                "existing_signature": _NULL_STR,
+                "action": {"type": "string"},
+                "message": {"type": "string"},
+                "near_match": {
+                    "type": ["object", "null"],
+                    "description": (
+                        "Not blocked, but inspect it: a signature-only type-declaration match, "
+                        "or (with `language`) a match in a language other than the one checked."
+                    ),
+                    "properties": {
+                        "qualified_name": _NULL_STR,
+                        "location": _NULL_STR,
+                        "signature": _NULL_STR,
+                        "language": {"type": "string"},
+                    },
+                },
+                "note": {"type": "string"},
+            },
+            "required": ["blocked", "kind", "reason", "action", "message", "near_match"],
+        },
     },
     {
         "name": "contract_status",
+        "safety": "runs_user_code",
+        "title": "Contract status",
         "description": (
             "Before starting work — and again before you claim to be done — read what the active "
             "verification contract requires and which parts are satisfied now: the declared "
@@ -94,9 +224,41 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "is satisfied. Runs the declared checks, so it costs what they cost."
         ),
         "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "contract": {
+                    "type": ["string", "null"],
+                    "description": "The declared task, or null when no contract is active.",
+                },
+                "locked": {"type": "boolean"},
+                "satisfied": {"type": "boolean"},
+                "diverged": {"type": "boolean"},
+                "checks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "run": {"type": "string"},
+                            "passed": {"type": "boolean"},
+                            "output": {
+                                "type": ["string", "null"],
+                                "description": "Failure tail; null on a pass.",
+                            },
+                        },
+                        "required": ["run", "passed", "output"],
+                    },
+                },
+                "pending_attestations": _STR_LIST,
+                "note": {"type": "string"},
+            },
+            "required": ["contract", "locked"],
+        },
     },
     {
         "name": "gate_history",
+        "safety": "query",
+        "title": "Gate history",
         "description": (
             "After a BLOCK, review recent gate decisions from the tamper-evident audit ledger, "
             "newest first (blocks, passes, refusals, with their evidence), to see whether you "
@@ -112,9 +274,28 @@ TOOL_SPECS: list[dict[str, Any]] = [
                 },
             },
         },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "entries": {
+                    "type": "array",
+                    "description": "Newest first.",
+                    "items": {
+                        "type": "object",
+                        # Ledger rows are free-form JSON; the keys are stable, the values aren't.
+                        "properties": {"type": {}, "ts": {}, "evidence": {}},
+                    },
+                },
+                "total": {"type": "integer"},
+                "note": {"type": "string"},
+            },
+            "required": ["entries"],
+        },
     },
     {
         "name": "blast_radius",
+        "safety": "query",
+        "title": "Blast radius",
         "description": (
             "Before modifying an exported symbol, use this instead of grep to find what depends on "
             "it — returns RESOLVED dependents over structural edges, not raw text matches."
@@ -133,12 +314,31 @@ TOOL_SPECS: list[dict[str, Any]] = [
                     "items": {"type": "string"},
                     "description": "Optional structural edge-type filter.",
                 },
+                **_PAGING_ARGS,
             },
             "required": ["symbol"],
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "found": {"type": "boolean"},
+                "symbol": {
+                    "type": "string",
+                    "description": "Canonical qualified name when found; the query as given else.",
+                },
+                "depth": {"type": "integer"},
+                "candidates": _STR_LIST,
+                "affected": {"type": "array", "items": _NODE_BRIEF_SCHEMA},
+                "count": {"type": "integer"},
+                **_PAGE_PROPS,
+            },
+            "required": ["found", "symbol", "affected", "count"],
         },
     },
     {
         "name": "find_symbol",
+        "safety": "query",
+        "title": "Find symbol",
         "description": (
             "Use instead of grep when you need to resolve a symbol by name (bare, suffix, or "
             "fully qualified) — returns RESOLVED qnames with locations, not raw text. Grep is "
@@ -149,9 +349,35 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "properties": {"qualified_name": {"type": "string"}},
             "required": ["qualified_name"],
         },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "found": {"type": "boolean"},
+                "qualified_name": {"type": "string"},
+                "candidates": _STR_LIST,
+                "id": {"type": "string"},
+                "kind": {"type": "string"},
+                "name": {"type": "string"},
+                "unit": {"type": "string"},
+                "signature": _NULL_STR,
+                "visibility": {"type": "string"},
+                "location": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "start_line": {"type": "integer"},
+                        "end_line": {"type": "integer"},
+                    },
+                    "required": ["path", "start_line", "end_line"],
+                },
+            },
+            "required": ["found", "qualified_name"],
+        },
     },
     {
         "name": "find_references",
+        "safety": "query",
+        "title": "Find references",
         "description": (
             "Use instead of grep to find all callers/references of a symbol — returns RESOLVED "
             "callers over structural edges with file:line, not raw text hits including comments "
@@ -159,16 +385,31 @@ TOOL_SPECS: list[dict[str, Any]] = [
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"qualified_name": {"type": "string"}},
+            "properties": {"qualified_name": {"type": "string"}, **_PAGING_ARGS},
             "required": ["qualified_name"],
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "found": {"type": "boolean"},
+                "qualified_name": {"type": "string"},
+                "candidates": _STR_LIST,
+                "references": {"type": "array", "items": _NODE_BRIEF_WITH_SITES_SCHEMA},
+                "count": {"type": "integer"},
+                **_PAGE_PROPS,
+            },
+            "required": ["found", "qualified_name", "references", "count"],
         },
     },
     {
         "name": "suggest_tests",
+        "safety": "query",
+        "title": "Suggest tests",
         "description": (
             "After changing a function/class, list the tests that exercise it (so they can be "
             "reviewed/re-run). Advisory — never blocks. Pass `symbols` (bare/suffix/full "
-            "names) or a unified `diff`."
+            "names) or a unified `diff`. If `truncated`, `units` lists only the first test "
+            "files — page with `offset`."
         ),
         "input_schema": {
             "type": "object",
@@ -176,34 +417,81 @@ TOOL_SPECS: list[dict[str, Any]] = [
                 "symbols": {"type": "array", "items": {"type": "string"}},
                 "diff": {"type": "string", "description": "A unified diff of the change."},
                 "depth": {"type": "integer", "minimum": 1, "default": 1},
+                **_PAGING_ARGS,
             },
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "changed": _STR_LIST,
+                "changed_count": _ECHO_COUNT,
+                "tests": {"type": "array", "items": _FLAGGED_TEST_SCHEMA},
+                "count": {"type": "integer"},
+                "unresolved_symbols": _UNRESOLVED_SCHEMA,
+                "unresolved_count": _ECHO_COUNT,
+                **_PAGE_PROPS,
+            },
+            "required": ["changed", "tests", "count"],
         },
     },
     {
         "name": "doc_drift",
+        "safety": "query",
+        "title": "Doc drift",
         "description": (
             "After changing a symbol, list the docs that explicitly reference it (and may now be "
             "stale). Advisory — never blocks. Pass `symbols` (bare/suffix/full names) or a "
-            "unified `diff`."
+            "unified `diff`. If `truncated`, page with `offset`."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "symbols": {"type": "array", "items": {"type": "string"}},
                 "diff": {"type": "string", "description": "A unified diff of the change."},
+                **_PAGING_ARGS,
             },
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "changed": _STR_LIST,
+                "changed_count": _ECHO_COUNT,
+                "docs": {"type": "array", "items": _FLAGGED_DOC_SCHEMA},
+                "count": {"type": "integer"},
+                "unresolved_symbols": _UNRESOLVED_SCHEMA,
+                "unresolved_count": _ECHO_COUNT,
+                **_PAGE_PROPS,
+            },
+            "required": ["changed", "docs", "count"],
         },
     },
     {
         "name": "find_cycles",
+        "safety": "query",
+        "title": "Find import cycles",
         "description": (
             "Use to detect module-level import cycles (circular dependencies) — a whole-program "
             "structural check no single-file view can make. Takes no input."
         ),
         "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "cycles": {
+                    "type": "array",
+                    "items": _STR_LIST,
+                    "description": "Each cycle is a list of module qualified names.",
+                },
+                "count": {"type": "integer"},
+                "truncated": {"type": "boolean"},
+            },
+            "required": ["cycles", "count", "truncated"],
+        },
     },
     {
         "name": "find_duplicate_bodies",
+        "safety": "query",
+        "title": "Find duplicate bodies",
         "description": (
             "Use to find groups of functions with identical copy-pasted bodies (even across "
             "renames) — catches what the signature-exact duplicate gate misses. Advisory, "
@@ -219,16 +507,33 @@ TOOL_SPECS: list[dict[str, Any]] = [
                         "Minimum symbol line-span (signature + body); symbols shorter than this "
                         "are skipped. Default 3."
                     ),
-                }
+                },
+                **_PAGING_ARGS,
             },
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "groups": {
+                    "type": "array",
+                    "items": _STR_LIST,
+                    "description": "Each group: qualified names sharing one identical body.",
+                },
+                "count": {"type": "integer"},
+                **_PAGE_PROPS,
+            },
+            "required": ["groups", "count"],
         },
     },
     {
         "name": "impact_summary",
+        "safety": "query",
+        "title": "Impact summary",
         "description": (
             "Use at PR time to summarize impact: for changed symbols, lists who is affected, which "
             "tests to run, and which docs may be stale. Pass `symbols` (bare/suffix/full names) or "
-            "a unified `diff`. Advisory, never blocks."
+            "a unified `diff`. Advisory, never blocks. Lists are cut to `limit` (`counts` has the "
+            "totals); if `truncated`, get the rest from suggest_tests, doc_drift and blast_radius."
         ),
         "input_schema": {
             "type": "object",
@@ -236,11 +541,51 @@ TOOL_SPECS: list[dict[str, Any]] = [
                 "symbols": {"type": "array", "items": {"type": "string"}},
                 "diff": {"type": "string", "description": "A unified diff of the change."},
                 "depth": {"type": "integer", "minimum": 1, "default": 1},
+                "limit": _LIMIT_ARG,
             },
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "changed": _STR_LIST,
+                "affected": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "qualified_name": {"type": "string"},
+                            "unit": {"type": "string"},
+                            "location": {"type": "string", "description": "path:line"},
+                        },
+                        "required": ["qualified_name", "unit", "location"],
+                    },
+                },
+                "tests": {"type": "array", "items": _FLAGGED_TEST_SCHEMA},
+                "docs": {"type": "array", "items": _FLAGGED_DOC_SCHEMA},
+                "counts": {
+                    "type": "object",
+                    "properties": {
+                        "changed": {"type": "integer"},
+                        "affected": {"type": "integer"},
+                        "tests": {"type": "integer"},
+                        "docs": {"type": "integer"},
+                    },
+                    "required": ["changed", "affected", "tests", "docs"],
+                },
+                "unresolved_symbols": _UNRESOLVED_SCHEMA,
+                "unresolved_count": _ECHO_COUNT,
+                "truncated": {
+                    "type": "boolean",
+                    "description": "A list was cut to the limit; counts holds the totals.",
+                },
+            },
+            "required": ["changed", "affected", "tests", "docs", "counts"],
         },
     },
     {
         "name": "localize",
+        "safety": "query",
+        "title": "Localize test failure",
         "description": (
             "Use when debugging a failing test: ranks likely culprits as symbols the test "
             "exercises that the change touched (reach ∩ diff), nearest to the test first. Pass "
@@ -256,12 +601,46 @@ TOOL_SPECS: list[dict[str, Any]] = [
                 },
                 "diff": {"type": "string", "description": "A unified diff of the change."},
                 "depth": {"type": "integer", "minimum": 1, "default": DEFAULT_MAX_DEPTH},
+                **_PAGING_ARGS,
             },
             "required": ["test"],
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "found": {"type": "boolean"},
+                "test": {"type": "string"},
+                "reason": _NULL_STR,
+                "depth_searched": {"type": "integer"},
+                "suspects": {
+                    "type": "array",
+                    "description": "Nearest to the test first.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "qualified_name": {"type": "string"},
+                            "location": {"type": "string", "description": "path:line"},
+                            "distance": {
+                                "type": "integer",
+                                "description": "Call-graph hops from the test (1 = direct).",
+                            },
+                            "changed_lines": _INT_LIST,
+                            "output_relevant_lines": _INT_LIST,
+                            "output_analyzed": {"type": "boolean"},
+                        },
+                        "required": ["qualified_name", "location", "distance"],
+                    },
+                },
+                "count": {"type": "integer"},
+                **_PAGE_PROPS,
+            },
+            "required": ["found", "test", "suspects", "count"],
         },
     },
     {
         "name": "slice",
+        "safety": "query",
+        "title": "Program slice",
         "description": (
             "Use to compute program slices (Python/JS/TS): given a `source` and 1-based `line`, "
             "returns statements that AFFECT that line (backward slice — control + data dependence) "
@@ -282,19 +661,64 @@ TOOL_SPECS: list[dict[str, Any]] = [
             },
             "required": ["source", "line"],
         },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "found": {"type": "boolean"},
+                "reason": {"type": "string"},
+                "forward": {"type": "boolean"},
+                "lines": _INT_LIST,
+                "statements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "line": {"type": "integer"},
+                            "end_line": {"type": "integer"},
+                            "code": {"type": "string"},
+                        },
+                        "required": ["line", "end_line", "code"],
+                    },
+                },
+            },
+            "required": ["found"],
+        },
     },
     {
         "name": "find_dead_code",
+        "safety": "query",
+        "title": "Find dead code",
         "description": (
             "Use to find top-level INTERNAL symbols with no in-repo reference — dead-code "
             "candidates. Conservative (internal-only, top-level-only; tests/entrypoints/dunders "
             "excluded). Advisory, never blocks; dynamic dispatch/reflection/registration can "
-            "still make one live, so review before deleting. Takes no input."
+            "still make one live, so review before deleting."
         ),
-        "input_schema": {"type": "object", "properties": {}},
+        "input_schema": {"type": "object", "properties": {**_PAGING_ARGS}},
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "qualified_name": {"type": "string"},
+                            "location": {"type": "string", "description": "path:line"},
+                        },
+                        "required": ["qualified_name", "location"],
+                    },
+                },
+                "count": {"type": "integer"},
+                **_PAGE_PROPS,
+            },
+            "required": ["candidates", "count"],
+        },
     },
     {
         "name": "read_symbol",
+        "safety": "query",
+        "title": "Read symbol",
         "description": (
             "Use when you need to SEE a symbol's actual code. One call instead of grep + reading "
             "the whole file — returns the exact source span. Shows location context and detects "
@@ -305,9 +729,28 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "properties": {"qualified_name": {"type": "string"}},
             "required": ["qualified_name"],
         },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "found": {"type": "boolean"},
+                "qualified_name": {"type": "string"},
+                "candidates": _STR_LIST,
+                "signature": _NULL_STR,
+                "location": {"type": "string", "description": "path:start-end"},
+                "source": {
+                    "type": ["string", "null"],
+                    "description": "The exact source span; null with a `note` when unreadable.",
+                },
+                "note": {"type": "string"},
+                "truncated": {"type": "boolean"},
+            },
+            "required": ["found", "qualified_name"],
+        },
     },
     {
         "name": "implementations",
+        "safety": "query",
+        "title": "Find implementations",
         "description": (
             "Use when you need who implements/subclasses X. Grep text-matching misses resolved "
             "cross-file inheritance — this traverses the graph's INHERITS/IMPLEMENTS edges "
@@ -315,26 +758,111 @@ TOOL_SPECS: list[dict[str, Any]] = [
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"qualified_name": {"type": "string"}},
+            "properties": {"qualified_name": {"type": "string"}, **_PAGING_ARGS},
             "required": ["qualified_name"],
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "found": {"type": "boolean"},
+                "qualified_name": {"type": "string"},
+                "candidates": _STR_LIST,
+                "implementations": {"type": "array", "items": _NODE_BRIEF_SCHEMA},
+                "count": {"type": "integer"},
+                **_PAGE_PROPS,
+            },
+            "required": ["found", "qualified_name", "implementations", "count"],
         },
     },
     {
         "name": "repo_map",
+        "safety": "query",
+        "title": "Repo map",
         "description": (
-            "First call in an unfamiliar repo: one call returns the module map — units, sizes, "
-            "public exports, dependency direction — replacing the exploratory grep/ls storm. "
-            "Use module=<unit path> to zoom into one file's exports and dependents."
+            "First call in an unfamiliar repo: one call returns the module map — files (in a "
+            "large repo, directories) with sizes and public exports — replacing the exploratory "
+            "grep/ls storm. Use module=<path> to zoom: into a directory (`x/.` = only the "
+            "files directly in x), or into a file for its signatures and dependents."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "module": {
                     "type": "string",
-                    "description": "Optional unit path to zoom into.",
-                }
+                    "description": "Optional directory or unit path to zoom into.",
+                },
+                **_PAGING_ARGS,
             },
             "required": [],
+        },
+        # Four shapes: overview by file (`units`), overview by directory (`dirs`, when the files
+        # do not fit), detail (exact unit hit), miss (candidates). The anyOf pins which keys each
+        # shape guarantees; the property definitions are shared. `_PAGE_PROPS` is not merged in:
+        # its `units` (a rollup of paths) would collide with this tool's own `units` rows.
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "units": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "unit": {"type": "string"},
+                            "symbols": {"type": "integer"},
+                            "exports": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Names of the top-level public symbols.",
+                            },
+                            "more": {
+                                "type": "integer",
+                                "description": "Exports beyond the cap (overview only).",
+                            },
+                        },
+                        "required": ["unit", "symbols", "exports"],
+                    },
+                },
+                "dirs": {
+                    "type": "array",
+                    "description": "Pass a `dir` back as `module` to zoom into it.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "dir": {
+                                "type": "string",
+                                "description": "`x/.` means the files directly in x.",
+                            },
+                            "units": {"type": "integer"},
+                            "symbols": {"type": "integer"},
+                        },
+                        "required": ["dir", "units", "symbols"],
+                    },
+                },
+                "dir_count": {"type": "integer"},
+                "depth": {"type": "integer", "description": "Directory levels shown below root."},
+                "root": {"type": "string"},
+                "unit_count": {"type": "integer"},
+                "node_count": {"type": "integer"},
+                "edge_count": {"type": "integer"},
+                "found": {"type": "boolean"},
+                "unit": {"type": "string"},
+                "exports": {"type": "array", "items": {"type": "object"}},
+                "count": {"type": "integer", "description": "Detail: total exports."},
+                "dependents": _STR_LIST,
+                "dependent_count": {"type": "integer"},
+                "dependents_truncated": {
+                    "type": "boolean",
+                    "description": "`dependents` is partial; `dependent_count` is the total.",
+                },
+                "candidates": _STR_LIST,
+                "returned": {"type": "integer"},
+                "truncated": {"type": "boolean"},
+                "next_offset": {"type": "integer"},
+            },
+            "anyOf": [
+                {"required": ["unit_count", "node_count", "edge_count"]},
+                {"required": ["found", "unit"]},
+            ],
         },
     },
 ]
@@ -441,22 +969,87 @@ class CartogateTools:
     def check_duplicate(
         self,
         signature: str,
-        language: str = "python",
+        language: str | None = None,
         exclude_unit: str | None = None,
         proposed_body_hash: str | None = None,
         proposed_is_type_decl: bool | None = None,
     ) -> dict[str, Any]:
+        """Whether ``signature`` duplicates an existing symbol.
+
+        With a ``language`` the check is scoped to it; the write and commit gates always pass
+        one, taken from the file being written. Without one the signature is checked as Python,
+        the documented default, and only that verdict can block. A caller who simply left the
+        language out must not get a silent all-clear for a duplicate in another language, nor be
+        blocked on a guess about which language it is writing: so when Python does not block,
+        a match in any other language is reported as ``near_match``, and ``note`` names every
+        language that matched (normalised signatures coincide across languages, so the first
+        match is not necessarily the caller's language).
+        """
+        if language is not None:
+            return self._check_duplicate_in(
+                signature, Language(language), exclude_unit, proposed_body_hash,
+                proposed_is_type_decl,
+            )
+
+        verdict = self._check_duplicate_in(
+            signature, Language.PYTHON, exclude_unit, proposed_body_hash, proposed_is_type_decl
+        )
+        if verdict["blocked"]:
+            return verdict
+
+        matches: list[dict[str, Any]] = []
+        for other in Language:
+            if other is Language.PYTHON:
+                continue
+            found = self._check_duplicate_in(
+                signature, other, exclude_unit, proposed_body_hash, proposed_is_type_decl
+            )
+            if found["blocked"]:
+                matches.append(
+                    {
+                        "qualified_name": found["existing_qualified_name"],
+                        "location": found["existing_location"],
+                        "signature": found["existing_signature"],
+                        "language": other.value,
+                    }
+                )
+            elif found["near_match"] is not None:
+                matches.append(found["near_match"])
+        if matches:
+            if verdict["near_match"] is None:
+                verdict["near_match"] = matches[0]
+            languages = [match["language"] for match in matches]
+            verdict["note"] = (
+                "Checked as python (no language given). A symbol with this signature exists "
+                + (
+                    f"in {languages[0]}; pass language={languages[0]!r} to check it as that."
+                    if len(languages) == 1
+                    else f"in: {', '.join(languages)}. Pass the language you are writing."
+                )
+            )
+        return verdict
+
+    def _check_duplicate_in(
+        self,
+        signature: str,
+        language: Language,
+        exclude_unit: str | None,
+        proposed_body_hash: str | None,
+        proposed_is_type_decl: bool | None,
+    ) -> dict[str, Any]:
+        """The duplicate verdict for ``signature`` read as ``language``."""
         # exclude_unit == surfaces.gate_proposed_source's editing_unit / the hook's _editing_unit
         # (the file being edited; same concept threaded down from the PreToolUse path).
         result = self._block.check_duplicate(
             signature,
-            Language(language),
+            language,
             exclude_unit=exclude_unit,
             proposed_body_hash=proposed_body_hash,
             proposed_is_type_decl=proposed_is_type_decl,
         )
         return {
             "blocked": result.blocked,
+            "language": language.value,
             "kind": result.kind.value,
             "reason": result.reason,
             "existing_symbol_id": result.existing_symbol_id,
@@ -477,6 +1070,7 @@ class CartogateTools:
                     "qualified_name": result.existing_qualified_name,
                     "location": result.existing_location,
                     "signature": result.existing_signature,
+                    "language": language.value,
                 }
                 if not result.blocked and result.existing_qualified_name is not None
                 else None
@@ -713,125 +1307,151 @@ class CartogateTools:
         return result
 
     def repo_map(self, module: str | None = None) -> dict[str, Any]:
-        """Repo orientation: list all units with exports, or zoom into one module.
+        """Repo orientation: list units with exports, or zoom into a directory or one file.
 
         Overview mode (module=None): lists all units with symbol counts, top-level public exports
         (capped at EXPORTS_CAP=8), and summary statistics.
 
-        Detail mode (module=str): for an exact unit match, returns full exports (uncapped) and
-        the units that import from this one (dependents).
+        Zoom mode (module=a directory): the same overview restricted to that directory's subtree,
+        with ``root`` set to it. A path ending ``/.`` (or ``.`` alone, for the top) selects only
+        the files directly in the directory, not those in its subdirectories.
+
+        Detail mode (module=an exact unit): full exports (uncapped) and the units that import
+        from this one (dependents). An exact unit wins over a directory of the same name.
 
         Miss mode: returns found=False with candidates matching basename or path suffix.
         """
         if module is None:
-            # Overview: iterate the repo's own units, collect exports + counts.
-            units = []
-            total_nodes = 0
-            total_edges = 0
+            overview = self._map_overview(None)
+            assert overview is not None  # the whole repository is never a miss
+            return overview
 
-            for unit, nodes, edges in self._store.iter_unit_facts():
-                # Skip the synthetic <externals> unit — it is not a file in the repo, and listing
-                # it as one confuses the orientation this tool exists to give.
-                if unit == _EXTERNALS_UNIT:
-                    continue
-                total_edges += len(edges)
+        # Detail: exact unit match - search through all units
+        target_nodes = None
 
-                # Count SYMBOL nodes only — the per-file MODULE node is structural, not a symbol,
-                # and counting it would report a file with 3 functions as having 4 symbols.
-                unit_symbols = [n for n in nodes if n.kind is NodeKind.SYMBOL]
-                total_nodes += len(unit_symbols)
+        for unit, nodes, _edges in self._store.iter_unit_facts():
+            if unit == module:
+                target_nodes = nodes
+                break
 
-                # Exports: top-level public symbols only.
-                exports = [
-                    {"name": n.name, "signature": n.signature}
-                    for n in unit_symbols
-                    if n.is_top_level and n.visibility is not Visibility.INTERNAL
-                ]
-                exports = sorted(exports, key=lambda e: str(e["name"]))
+        if target_nodes is None:
+            subtree = self._map_overview(module)
+            if subtree is not None:
+                return subtree
 
-                # Cap exports
-                capped_exports = exports[:EXPORTS_CAP]
-                unit_dict: dict[str, Any] = {
-                    "unit": unit,
-                    "symbols": len(unit_symbols),
-                    "exports": capped_exports,
-                }
-                if len(exports) > EXPORTS_CAP:
-                    unit_dict["more"] = len(exports) - EXPORTS_CAP
+            # No match: find candidates by basename or suffix
+            all_units = list(self._store.units())
+            basename = module.rsplit("/", 1)[-1]
 
-                units.append(unit_dict)
-
-            # Sort for cross-backend determinism — every other list result in this module does.
-            units = sorted(units, key=lambda u: u["unit"])
-            return {
-                "units": units,
-                "unit_count": len(units),
-                "node_count": total_nodes,
-                "edge_count": total_edges,
-            }
-
-        else:
-            # Detail: exact unit match - search through all units
-            target_nodes = None
-
-            for unit, nodes, _edges in self._store.iter_unit_facts():
-                if unit == module:
-                    target_nodes = nodes
-                    break
-
-            if target_nodes is None:
-                # No match: find candidates by basename or suffix
-                all_units = list(self._store.units())
-                basename = module.rsplit("/", 1)[-1]
-
-                candidates = [
-                    u for u in all_units
-                    if u.endswith(basename) or u.endswith("/" + basename)
-                ]
-                # Also include units sharing the basename
-                candidates += [u for u in all_units if u.rsplit("/", 1)[-1] == basename]
-                candidates = sorted(set(candidates))[:5]
-
-                return {
-                    "found": False,
-                    "unit": module,
-                    "candidates": candidates,
-                }
-
-            # Exact match: get exports and dependents
-            nodes = target_nodes
-
-            # Exports: all top-level symbols (uncapped)
-            exports = [
-                {**_node_brief(n), "name": n.name}
-                for n in nodes
-                if n.kind is NodeKind.SYMBOL and n.is_top_level
+            candidates = [
+                u for u in all_units
+                if u.endswith(basename) or u.endswith("/" + basename)
             ]
-            exports = sorted(exports, key=lambda e: str(e["qualified_name"]))
-
-            # Dependents: units that import from this unit's nodes
-            # Iterate through all units to find imports-type edges pointing to our nodes
-            node_ids = {n.id for n in nodes}
-            dependents_set = set()
-            for other_unit, _, other_edges in self._store.iter_unit_facts():
-                for edge in other_edges:
-                    if edge.type is EdgeType.IMPORTS and edge.dst in node_ids:
-                        # This unit imports from the target unit
-                        dependents_set.add(other_unit)
-                        break  # Found at least one import, can move to next unit
-
-            dependents = sorted(dependents_set)
+            # Also include units sharing the basename
+            candidates += [u for u in all_units if u.rsplit("/", 1)[-1] == basename]
+            candidates = sorted(set(candidates))[:5]
 
             return {
-                "found": True,
+                "found": False,
                 "unit": module,
-                "exports": exports,
-                "dependents": dependents,
+                "candidates": candidates,
             }
+
+        # Exact match: get exports and dependents
+        nodes = target_nodes
+
+        # Exports: all top-level symbols (uncapped)
+        exports = [
+            {**_node_brief(n), "name": n.name}
+            for n in nodes
+            if n.kind is NodeKind.SYMBOL and n.is_top_level
+        ]
+        exports = sorted(exports, key=lambda e: str(e["qualified_name"]))
+
+        # Dependents: units that import from this unit's nodes
+        # Iterate through all units to find imports-type edges pointing to our nodes
+        node_ids = {n.id for n in nodes}
+        dependents_set = set()
+        for other_unit, _, other_edges in self._store.iter_unit_facts():
+            for edge in other_edges:
+                if edge.type is EdgeType.IMPORTS and edge.dst in node_ids:
+                    # This unit imports from the target unit
+                    dependents_set.add(other_unit)
+                    break  # Found at least one import, can move to next unit
+
+        dependents = sorted(dependents_set)
+
+        return {
+            "found": True,
+            "unit": module,
+            "exports": exports,
+            "dependents": dependents,
+        }
+
+    def _map_overview(self, root: str | None) -> dict[str, Any] | None:
+        """The overview of the whole repository (``root=None``) or of one directory.
+
+        Returns ``None`` when ``root`` selects no unit, so the caller can report a miss.
+        """
+        selects = _unit_selector(root)
+        units = []
+        total_nodes = 0
+        total_edges = 0
+
+        for unit, nodes, edges in self._store.iter_unit_facts():
+            # Skip the synthetic <externals> unit — it is not a file in the repo, and listing
+            # it as one confuses the orientation this tool exists to give.
+            if unit == _EXTERNALS_UNIT or not selects(unit):
+                continue
+            total_edges += len(edges)
+
+            # Count SYMBOL nodes only — the per-file MODULE node is structural, not a symbol,
+            # and counting it would report a file with 3 functions as having 4 symbols.
+            unit_symbols = [n for n in nodes if n.kind is NodeKind.SYMBOL]
+            total_nodes += len(unit_symbols)
+
+            # Exports: top-level public symbols only.
+            exports = [
+                {"name": n.name, "signature": n.signature}
+                for n in unit_symbols
+                if n.is_top_level and n.visibility is not Visibility.INTERNAL
+            ]
+            exports = sorted(exports, key=lambda e: str(e["name"]))
+
+            # Cap exports
+            capped_exports = exports[:EXPORTS_CAP]
+            unit_dict: dict[str, Any] = {
+                "unit": unit,
+                "symbols": len(unit_symbols),
+                "exports": capped_exports,
+            }
+            if len(exports) > EXPORTS_CAP:
+                unit_dict["more"] = len(exports) - EXPORTS_CAP
+
+            units.append(unit_dict)
+
+        if root is not None and not units:
+            return None
+
+        # Sort for cross-backend determinism — every other list result in this module does.
+        units = sorted(units, key=lambda u: u["unit"])
+        result: dict[str, Any] = {
+            "units": units,
+            "unit_count": len(units),
+            "node_count": total_nodes,
+            "edge_count": total_edges,
+        }
+        if root is not None:
+            result["root"] = _normal_root(root)
+        return result
 
     # --- Contract / ledger surface (PR C) --------------------------------------------------
-    # Read-only and advisory. Both degrade to a `note` rather than raising: these run inside the
-    # agent's loop, and a gate surface that throws is a gate surface the agent learns to avoid.
+    # Advisory: both degrade to a `note` rather than raising, because these run inside the agent's
+    # loop and a gate surface that throws is a gate surface the agent learns to avoid.
+    # Only `gate_history` is read-only. `contract_status` RUNS the contract's declared `run:`
+    # checks (arbitrary shell, via verify.evaluate -> subprocess.run) plus a `git write-tree`,
+    # which is why it carries its own MCP hints instead of the read-only default — see
+    # `_CONTRACT_STATUS_ANNOTATIONS` in mcp/server.py. Keep those in sync with this behaviour.
     # Imported lazily to keep this module's import cost off the write gate's path (PR B).
 
     def contract_status(self) -> dict[str, Any]:
@@ -931,13 +1551,24 @@ def _int_arg(arguments: dict[str, Any], key: str, default: int) -> int:
 
 
 def dispatch(tools: CartogateTools, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Run a tool call and return its result as an MCP caller receives it.
+
+    Routes by name to the matching method (raises on an unknown tool), then applies the
+    presentation step (``mcp/present.py``): rows are paged to the response budget and stop
+    repeating their file path. This is the one route the MCP server and the daemon share, so
+    the budget holds for both. The methods themselves stay full and unpaged for Python callers.
+    """
+    return present(name, _dispatch_raw(tools, name, arguments), arguments)
+
+
+def _dispatch_raw(tools: CartogateTools, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Route a tool call by name to the matching method. Raises on an unknown tool."""
     if name == "check_duplicate":
         # exclude_unit is hook-internal (the PreToolUse edit path) — intentionally not in
         # TOOL_SPECS, since a direct check_duplicate caller has no "editing this file" context.
         return tools.check_duplicate(
             arguments["signature"],
-            language=arguments.get("language", "python"),
+            language=arguments.get("language"),
             exclude_unit=arguments.get("exclude_unit"),
             proposed_body_hash=arguments.get("proposed_body_hash"),
             proposed_is_type_decl=arguments.get("proposed_is_type_decl"),
@@ -1013,6 +1644,28 @@ def _parse_edge_types(edge_types: Iterable[str] | None) -> list[EdgeType] | None
         except ValueError:
             continue
     return parsed
+
+
+def _unit_selector(root: str | None) -> Callable[[str], bool]:
+    """Which units a ``repo_map`` overview rooted at ``root`` covers.
+
+    ``None`` is the whole repository; ``dir`` is every unit under that directory; ``dir/.`` (or
+    ``.`` at the top) is only the units directly in it.
+    """
+    if root is None:
+        return lambda unit: True
+    if root == ".":
+        return lambda unit: "/" not in unit
+    if root.endswith("/."):
+        own = root[:-2]
+        return lambda unit: unit.rpartition("/")[0] == own
+    prefix = root.rstrip("/") + "/"
+    return lambda unit: unit.startswith(prefix)
+
+
+def _normal_root(root: str) -> str:
+    """``root`` as reported back: a directory without its trailing slash; ``dir/.`` as given."""
+    return root if root == "." or root.endswith("/.") else root.rstrip("/")
 
 
 def _node_brief(node: Node) -> dict[str, Any]:

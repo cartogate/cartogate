@@ -82,23 +82,22 @@ class TestPlaywrightDriverImport:
 class TestPlaywrightDriverInstantiation:
     """PlaywrightDriver instantiation (smoke test, requires playwright)."""
 
-    @pytest.mark.skipif(
-        not pytest.importorskip("playwright", minversion=None), reason="playwright not installed"
-    )
     def test_playwright_driver_class_exists(self) -> None:
-        """PlaywrightDriver class can be imported when playwright is available."""
+        """PlaywrightDriver class can be imported when playwright is available.
+
+        importorskip runs INSIDE the test: as a skipif decorator argument it
+        evaluated at collection and skipped the WHOLE MODULE whenever
+        playwright was absent — every browser-free test here included.
+        """
         pytest.importorskip("playwright")
         from cartogate.nav.playwright_driver import PlaywrightDriver
 
         # Just check that the class exists and is a class
         assert isinstance(PlaywrightDriver, type)
 
-    @pytest.mark.skipif(
-        not pytest.importorskip("playwright", minversion=None), reason="playwright not installed"
-    )
     def test_playwright_driver_satisfies_protocol(self) -> None:
         """PlaywrightDriver implements the Driver protocol (smoke)."""
-        pytest.importorskip("playwright")
+        pytest.importorskip("playwright")  # in-test: a skipif argument skips the module
         from cartogate.nav.playwright_driver import PlaywrightDriver
 
         # Check that PlaywrightDriver has the right methods
@@ -189,3 +188,66 @@ def test_resolve_joins_relative_against_base() -> None:
     assert _resolve("http://localhost:8000", "/viz.html#v=x") == (
         "http://localhost:8000/viz.html#v=x")
     assert _resolve("http://a:1", "http://b:2/full") == "http://b:2/full"  # absolutes pass
+
+
+class TestDiscoveryGuardScope:
+    """Permanent regression test for the popup bypass (review High 2026-07-21).
+
+    block_mutating_requests must register its route at the BROWSER CONTEXT, not
+    the page: a target=_blank link or window.open() spawns a NEW page a
+    page-scoped handler would never see, so a page-level registration is a
+    silently bypassable guard. Verified live in E2E; this pins the structure
+    browser-free so a refactor back to page.route() fails in CI.
+    """
+
+    @staticmethod
+    def _driver_with_stub_page(monkeypatch):  # type: ignore[no-untyped-def]
+        from types import SimpleNamespace
+
+        from cartogate.nav import playwright_driver as pw
+
+        monkeypatch.setattr(pw, "require_playwright", lambda: None)
+
+        context = SimpleNamespace(routes=[])
+        context.route = lambda pattern, handler: context.routes.append(
+            (pattern, handler)
+        )
+        page = SimpleNamespace(routes=[], context=context)
+        page.route = lambda pattern, handler: page.routes.append((pattern, handler))
+
+        driver = pw.PlaywrightDriver.__new__(pw.PlaywrightDriver)
+        driver._page = page  # _ensure_page returns it without importing playwright
+        driver.aborted_requests = []
+        return driver, page, context
+
+    def test_route_registers_on_the_context_not_the_page(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        driver, page, context = self._driver_with_stub_page(monkeypatch)
+        driver.block_mutating_requests()
+        assert len(context.routes) == 1, "guard must live on the browser context"
+        assert page.routes == [], "a page-scoped route is bypassable by a popup"
+        assert context.routes[0][0] == "**/*"
+
+    def test_handler_aborts_mutations_and_passes_reads(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from types import SimpleNamespace
+
+        driver, _page, context = self._driver_with_stub_page(monkeypatch)
+        driver.block_mutating_requests()
+        (_pattern, handler), = context.routes
+
+        outcomes: list[str] = []
+
+        def _route(method: str, url: str):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                request=SimpleNamespace(method=method, url=url),
+                abort=lambda: outcomes.append("abort"),
+                continue_=lambda: outcomes.append("continue"),
+            )
+
+        handler(_route("POST", "http://localhost/mutate"))
+        handler(_route("GET", "http://localhost/read"))
+        handler(_route("DELETE", "http://localhost/kill"))
+        assert outcomes == ["abort", "continue", "abort"]
+        assert driver.aborted_requests == [
+            "http://localhost/mutate",
+            "http://localhost/kill",
+        ]

@@ -12,7 +12,6 @@ PlaywrightDriver. All selenium imports are lazy; installing the adapter is
 from __future__ import annotations
 
 import contextlib
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,7 @@ from cartogate.nav.driver import (
     Target,
     Wait,
     needs_reload_after_fragment_nav,
+    url_matched,
 )
 from cartogate.nav.driver import resolve_url as _resolve
 from cartogate.nav.schema import NavMapError
@@ -111,16 +111,29 @@ def _role_xpath(role: str, name: str) -> tuple[str, str]:
     )
 
 
-def _iter_find(driver: Any, candidates: list[tuple[str, str]]) -> Any:
-    """First element matched by the candidate list, else None."""
+def _find_unique(driver: Any, target: Target) -> Any:
+    """Resolve ``target`` to exactly ONE element, or raise DriverError.
+
+    Candidate strategies are tried in order; ambiguity is judged WITHIN the first
+    strategy that matches anything. Silently taking the first of several matches
+    was the cross-driver divergence (Playwright's strict locators error on the
+    same map) — and the hidden-wrong-element bug strictness exists to surface.
+    """
+    candidates = _locator_candidates(target)
     for strategy, value in candidates:
         try:
             found = driver.find_elements(strategy, value)
         except Exception:  # noqa: BLE001 — a bad locator is just a non-match
             continue
+        if len(found) > 1:
+            raise DriverError(
+                f"ambiguous target {target!r}: {len(found)} elements match "
+                f"{strategy}={value!r} — tighten the name or declare a css selector"
+            )
         if found:
             return found[0]
-    return None
+    tried = "; ".join(f"{how}={what!r}" for how, what in candidates)
+    raise DriverError(f"element not found for {target!r} (tried: {tried})")
 
 
 class SeleniumDriver:
@@ -144,12 +157,7 @@ class SeleniumDriver:
         return self._driver
 
     def _find(self, target: Target) -> Any:
-        candidates = _locator_candidates(target)
-        element = _iter_find(self._ensure(), candidates)
-        if element is None:
-            tried = "; ".join(f"{how}={what!r}" for how, what in candidates)
-            raise DriverError(f"element not found for {target!r} (tried: {tried})")
-        return element
+        return _find_unique(self._ensure(), target)
 
     def navigate(self, url: str) -> None:
         """Navigate to ``url`` — map-relative urls resolve against ``base_url``."""
@@ -203,7 +211,7 @@ class SeleniumDriver:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if wait.url_matches is not None:
-                if re.search(wait.url_matches, self.current_url()):
+                if url_matched(wait.url_matches, self.current_url()):
                     return
             elif wait.target_visible is not None and self.is_visible(
                 wait.target_visible
@@ -224,10 +232,15 @@ class SeleniumDriver:
         return False
 
     def is_checked(self, target: Target) -> bool:
-        """Whether the resolved element is selected (radio/checkbox state)."""
+        """Whether the resolved element is selected (radio/checkbox state).
+
+        Broad catch on purpose: probes never raise. The old DriverError-only
+        catch let a stale-element WebDriverException escape, while
+        PlaywrightDriver already returned False on any failure.
+        """
         try:
             return bool(self._find(target).is_selected())
-        except DriverError:
+        except Exception:  # noqa: BLE001 — see docstring
             return False
 
     def page_inventory(self) -> dict[str, list[dict[str, str]]]:

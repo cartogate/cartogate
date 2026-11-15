@@ -18,6 +18,7 @@ from cartogate.nav.driver import (
     Target,
     Wait,
     needs_reload_after_fragment_nav,
+    url_matched,
 )
 from cartogate.nav.driver import resolve_url as _resolve
 from cartogate.nav.schema import NavMapError
@@ -124,7 +125,16 @@ class PlaywrightDriver:
         from playwright.sync_api import sync_playwright
 
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=self.headless)
+        try:
+            self._browser = self._playwright.chromium.launch(headless=self.headless)
+        except Exception as exc:
+            # pip install cartogate[nav] ships the playwright PACKAGE only; the
+            # chromium binary is a separate post-install download. Surface the
+            # one command that fixes it instead of playwright's raw traceback.
+            raise DriverError(
+                f"could not launch chromium: {exc} -- if the browser is not "
+                "installed, run: python -m playwright install chromium"
+            ) from exc
         self._page = self._browser.new_page()
         return self._page
 
@@ -195,8 +205,14 @@ class PlaywrightDriver:
 
         try:
             if wait.url_matches is not None:
-                # Wait for URL to match a pattern
-                page.wait_for_url(wait.url_matches, timeout=wait.timeout_s * 1000)
+                # Predicate, not the raw string: wait_for_url treats a plain string
+                # as a GLOB, but Wait.url_matches is a REGEX (the documented contract
+                # SeleniumDriver and FakeDriver already implement via url_matched).
+                pattern = wait.url_matches
+                page.wait_for_url(
+                    lambda u: url_matched(pattern, str(u)),
+                    timeout=wait.timeout_s * 1000,
+                )
             elif wait.target_visible is not None:
                 # Wait for element to be visible
                 locator = self._locator_for_target(wait.target_visible)

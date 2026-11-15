@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from cartogate.nav.driver import Driver, Target
+from cartogate.nav.proposals import echo_seed_state, write_proposal_doc
 from cartogate.nav.runtime import _url_params_count
 from cartogate.nav.schema import Landmark, load
 
@@ -51,29 +52,7 @@ def crawl_verify_propose(map_path: Path, driver: Driver) -> CrawlReport:
 
     proposed_states: list[dict[str, Any]] = []
     for state in navmap.states:
-        state_raw: dict[str, Any] = {
-            "id": state.id,
-            "url": state.url,
-            "landmarks": [
-                {
-                    "role": lm.role,
-                    "name": lm.name,
-                    **({"checked": lm.checked} if lm.checked is not None else {}),
-                    "provenance": lm.provenance,
-                }
-                for lm in state.landmarks
-            ],
-            "affordances": [
-                {
-                    "ref": aff.ref,
-                    "role": aff.role,
-                    "name": aff.name,
-                    **({"css": aff.css} if aff.css else {}),
-                    "provenance": aff.provenance,
-                }
-                for aff in state.affordances
-            ],
-        }
+        state_raw: dict[str, Any] = echo_seed_state(state)
 
         if _url_params_count(state.url) > 0:
             report.skipped.append((state.id, "url has :params and no declared path"))
@@ -101,20 +80,14 @@ def crawl_verify_propose(map_path: Path, driver: Driver) -> CrawlReport:
 
         proposed_states.append(state_raw)
 
-    proposal = {
-        "comment": (
+    report.proposed_path = write_proposal_doc(
+        map_path,
+        raw,
+        proposed_states,
+        comment=(
             "Crawled proposals — review, edit, and merge into the map yourself; "
             "crawled facts are runtime-observed and never authoritative."
         ),
-        "version": raw.get("version", 1),
-        "app": raw.get("app", ""),
-        "states": proposed_states,
-        "transitions": raw.get("transitions", []),
-        "flows": raw.get("flows", []),
-    }
-    proposed_path = map_path.with_suffix(".proposed.json")
-    proposed_path.write_text(
-        json.dumps(proposal, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        transitions=raw.get("transitions", []),
     )
-    report.proposed_path = proposed_path
     return report

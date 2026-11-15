@@ -11,12 +11,16 @@ import os
 from pathlib import Path
 
 import anyio
-from mcp.shared.memory import create_connected_server_and_client_session
+import mcp.types as types
+import pytest
+from tests.mcp_harness import create_connected_server_and_client_session
 
+import cartogate
 from cartogate.daemon import client as daemon_client
 from cartogate.daemon.refresh import GitLazyRefresh
 from cartogate.extract.pipeline import index_package
 from cartogate.mcp import server as mcp_server
+from cartogate.mcp.present import SURFACE_VERSION
 from cartogate.mcp.server import (
     _no_daemon_requested,
     _refresh_loop,
@@ -62,7 +66,7 @@ def test_server_lists_tools_and_dispatches_check_duplicate() -> None:
             result = await client.call_tool(
                 "check_duplicate", {"signature": "def authenticate(name):"}
             )
-            assert result.isError is False
+            assert result.is_error is False
             payload = json.loads(result.content[0].text)
             assert payload["blocked"] is True
             assert payload["existing_qualified_name"] == "sample_pkg.auth.authenticate"
@@ -114,6 +118,40 @@ def _tiny_git_repo(root: Path, func: str) -> None:
     (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
     (root / "pkg" / "a.py").write_text(f"def {func}():\n    return 1\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(root), "init", "-q"], check=True, capture_output=True)
+
+
+def test_client_roots_resolve_the_workspace_end_to_end(tmp_path: Path) -> None:
+    """The roots rung driven over the real wire: an unresolved server asks the CLIENT which
+    workspace this window is (a server->client request issued through the session the SDK hands
+    the handler), resolves from the answer, indexes, and serves the tool.
+
+    Every other roots test drives ``_repo_from_client_roots`` with a hand-built fake session, so
+    none of them touch the real one — which is how a broken session handle passed a green suite
+    once already. This is the test that would not have."""
+    repo = tmp_path / "proj"
+    _tiny_git_repo(repo, "helper")
+    # Empty env + a non-repo cwd neutralize the later rungs (env / guarded cwd), and the autouse
+    # CARTOGATE_HOME fixture empties the registry rung — so roots is the only rung that can win,
+    # and a pass means roots specifically resolved.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    resolver = mcp_server._make_deferred_resolver({}, elsewhere)
+
+    async def body() -> None:
+        async def _roots(context: object) -> types.ListRootsResult:
+            return types.ListRootsResult(roots=[types.Root(uri=repo.as_uri(), name="proj")])
+
+        server, _warm, _refresh = build_lazy_server(None, None, resolver=resolver)
+        async with create_connected_server_and_client_session(
+            server, list_roots_callback=_roots
+        ) as client:
+            result = await client.call_tool(
+                "find_symbol", {"qualified_name": "proj.pkg.a.helper"}
+            )
+            assert result.is_error is False
+            assert json.loads(result.content[0].text)["found"] is True
+
+    anyio.run(body)
 
 
 def test_crash_visibility_writes_native_fault_dumps_to_a_file(tmp_path: Path) -> None:
@@ -201,7 +239,9 @@ def test_unresolved_session_autoconnects_to_the_only_live_daemon(
 
     def _fake_query(_repo: Path, name: str, _arguments: dict, **_k: object) -> dict:
         seen.append(name)
-        return {"found": True, "tool": name}
+        # Shaped like a real daemon answer (same dispatch, same output_schema): the SDK client
+        # validates every success result against the advertised schema, stub or not.
+        return {"found": True, "qualified_name": "x", "tool": name}
 
     monkeypatch.setattr(mcp_server.daemon_client, "query", _fake_query)
 
@@ -216,7 +256,7 @@ def test_unresolved_session_autoconnects_to_the_only_live_daemon(
             res = json.loads(
                 (await client.call_tool("find_symbol", {"qualified_name": "x"})).content[0].text
             )
-            assert res == {"found": True, "tool": "find_symbol"}  # served via the daemon
+            assert res["found"] is True and res["tool"] == "find_symbol"  # served via the daemon
             assert seen == ["find_symbol"]
 
     anyio.run(body)
@@ -236,7 +276,8 @@ def test_roots_signal_beats_the_registry_rung(tmp_path: Path, monkeypatch) -> No
     class _RootsSession:
         client_params = None
 
-        async def list_roots(self) -> object:
+        # The rung issues the raw request (the deprecated wrapper is skipped on purpose).
+        async def send_request(self, request: object, result_type: object) -> object:
             return SimpleNamespace(roots=[SimpleNamespace(uri=roots_repo.as_uri())])
 
     async def body() -> None:
@@ -321,7 +362,9 @@ def test_workspace_root_retargets_an_autoconnected_workspace(
     )
 
     def _wrong_repo_answer(_repo: Path, name: str, _args: dict, **_k: object) -> dict:
-        return {"found": False, "served_by": "wrong-daemon", "tool": name}
+        # Conforms to find_cycles' output_schema — the client validates stubbed answers too.
+        return {"cycles": [], "count": 0, "truncated": False, "served_by": "wrong-daemon",
+                "tool": name}
 
     monkeypatch.setattr(mcp_server.daemon_client, "query", _wrong_repo_answer)
     no_signal_cwd = tmp_path / "editorish"
@@ -410,7 +453,6 @@ def test_daemon_spawn_carries_no_window_flag(monkeypatch, tmp_path: Path) -> Non
 def test_at_mention_resource_read_answers_any_uri(tmp_path: Path) -> None:
     """Windsurf's @cartogate mention issues resources/read for mcp://cartogate — without a read
     handler that surfaced as 'Method not found' to the user. Any URI now returns live status."""
-    from pydantic import AnyUrl
 
     repo = tmp_path / "proj"
     _tiny_git_repo(repo, "tau")
@@ -422,7 +464,7 @@ def test_at_mention_resource_read_answers_any_uri(tmp_path: Path) -> None:
             assert [str(r.uri) for r in listed.resources] == ["cartogate://status"]
 
             # Before a workspace is set: status says so (Windsurf asks for mcp://cartogate).
-            res = await client.read_resource(AnyUrl("mcp://cartogate"))
+            res = await client.read_resource("mcp://cartogate")
             status = json.loads(res.contents[0].text)  # type: ignore[union-attr]
             assert status["server"] == "cartogate"
             assert status["version"]  # the build identifies itself (git-derived)
@@ -432,7 +474,7 @@ def test_at_mention_resource_read_answers_any_uri(tmp_path: Path) -> None:
 
             # After activation the status reflects the live workspace.
             await client.call_tool("set_workspace", {"root": str(repo)})
-            res2 = await client.read_resource(AnyUrl("cartogate://status"))
+            res2 = await client.read_resource("cartogate://status")
             status2 = json.loads(res2.contents[0].text)  # type: ignore[union-attr]
             assert status2["workspace"] == str(repo.resolve())
             assert status2["mode"] in ("in-process", "daemon", "indexing")
@@ -500,7 +542,9 @@ def test_stale_daemon_is_replaced_on_version_mismatch(
                       repo=str(repo), resolve=True),
     )
     monkeypatch.setattr(
-        mcp_server.daemon_client, "health", lambda _r, **_k: {"version": cartogate.__version__}
+        mcp_server.daemon_client,
+        "health",
+        lambda _r, **_k: {"version": cartogate.__version__, "surface": SURFACE_VERSION},
     )
     assert mcp_server._resolved_daemon_ready(repo) is True
     assert read_discovery(repo) is not None
@@ -563,8 +607,8 @@ def test_first_call_with_workspace_root_param_self_configures(tmp_path: Path) ->
             # Every lazy-server tool advertises the optional workspace_root param.
             listed = await client.list_tools()
             by_name = {t.name: t for t in listed.tools}
-            assert "workspace_root" in by_name["find_symbol"].inputSchema["properties"]
-            assert "workspace_root" in by_name["check_duplicate"].inputSchema["properties"]
+            assert "workspace_root" in by_name["find_symbol"].input_schema["properties"]
+            assert "workspace_root" in by_name["check_duplicate"].input_schema["properties"]
 
             # One call: configure + serve.
             found = json.loads(
@@ -618,7 +662,8 @@ def test_workspace_root_param_activates_daemon_and_strips_before_forwarding(
 
     def _fake_query(_repo: Path, name: str, arguments: dict[str, object], **_k: object) -> dict:
         seen.append(dict(arguments))
-        return {"found": False, "tool": name}
+        # Conforms to find_symbol's output_schema — the client validates stubbed answers too.
+        return {"found": False, "qualified_name": "x.y", "tool": name}
 
     monkeypatch.setattr(mcp_server.daemon_client, "query", _fake_query)
 
@@ -650,10 +695,248 @@ def test_workspace_root_param_bad_path_returns_actionable_error() -> None:
             assert res["action"] == "set_workspace" and "rejected" in res["error"]
 
             # A non-string value: the SDK validates it against the advertised schema and rejects
-            # the call (isError) before our handler — and if a lax client got through, the
+            # the call (is_error) before our handler — and if a lax client got through, the
             # isinstance guard would discard it. Either way: no crash, tool not served.
             res2 = await client.call_tool("find_cycles", {"workspace_root": 42})
-            assert res2.isError is True
+            assert res2.is_error is True
+
+    anyio.run(body)
+
+
+def test_tool_arguments_are_validated_against_the_advertised_schema() -> None:
+    """mcp 1.x validated every tools/call against the tool's inputSchema inside the SDK; 2.0
+    dropped per-tool validation, so the server does it. Without this a wrong-typed argument
+    reaches dispatch, gets discarded by a downstream guard, and the call reports SUCCESS —
+    a silently served bad call where there used to be a rejection."""
+
+    async def body() -> None:
+        server = build_server(_store())
+        async with create_connected_server_and_client_session(server) as client:
+            # Wrong type for a declared property: rejected, and the tool never runs.
+            bad = await client.call_tool("find_symbol", {"qualified_name": 42})
+            assert bad.is_error is True
+            assert "invalid arguments" in bad.content[0].text
+
+            # A missing required property is rejected the same way.
+            missing = await client.call_tool("check_duplicate", {})
+            assert missing.is_error is True
+
+            # Valid arguments are untouched — the guard only rejects what the schema rejects.
+            ok = await client.call_tool(
+                "find_symbol", {"qualified_name": "sample_pkg.auth.authenticate"}
+            )
+            assert ok.is_error is False
+            assert json.loads(ok.content[0].text)["found"] is True
+
+    anyio.run(body)
+
+
+def test_handler_exceptions_become_error_results_not_protocol_errors() -> None:
+    """1.x's ``@server.call_tool()`` wrapped every handler in
+    ``except Exception -> isError=True``. 2.0's ``add_request_handler`` has no such net, so an
+    escaping exception surfaces as a JSON-RPC *protocol* error instead — which reads to the
+    agent as a broken SERVER rather than a failed tool, and diverges from the daemon surface,
+    which returns a structured error for exactly this input."""
+
+    async def body() -> None:
+        server = build_server(_store())
+        async with create_connected_server_and_client_session(server) as client:
+            res = await client.call_tool("no_such_tool", {})
+            assert res.is_error is True
+            assert "unknown tool" in json.loads(res.content[0].text)["error"]
+
+    anyio.run(body)
+
+
+def test_tools_advertise_titles_and_read_only_annotations() -> None:
+    """The annotations tell an agent these calls are free: nothing to undo, nothing to confirm,
+    no penalty for calling again. That is load-bearing rather than decorative — a gate the agent
+    avoids because it looks expensive or risky is a gate that doesn't fire (STRATEGY.md law 3)."""
+
+    async def body() -> None:
+        server = build_server(_store())
+        async with create_connected_server_and_client_session(server) as client:
+            tools = (await client.list_tools()).tools
+            assert tools, "no tools advertised"
+            for tool in tools:
+                assert tool.title, f"{tool.name} has no display title"
+                ann = tool.annotations
+                assert ann is not None, f"{tool.name} has no annotations"
+                if tool.name == "contract_status":
+                    continue  # runs user-declared shell checks — see the test below
+                assert ann.read_only_hint is True, tool.name
+                assert ann.destructive_hint is False, tool.name
+                assert ann.idempotent_hint is True, tool.name
+                assert ann.open_world_hint is False, tool.name  # local graph only, never network
+
+    anyio.run(body)
+
+
+def test_every_tool_result_carries_matching_structured_content() -> None:
+    """2.x dual emit: every successful result carries ``structured_content`` alongside the JSON
+    text block, and the two are the SAME payload — a structured-aware client and a text-only
+    client must never see different answers.
+
+    The client is also the adversary here: the SDK REJECTS any success result whose
+    ``structured_content`` is missing or fails the advertised ``output_schema``, so each
+    ``call_tool`` below doubles as an over-the-wire schema-conformance check."""
+
+    async def body() -> None:
+        server = build_server(_store())
+        async with create_connected_server_and_client_session(server) as client:
+            tools = (await client.list_tools()).tools
+            for tool in tools:
+                assert tool.output_schema is not None, f"{tool.name} advertises no output_schema"
+            args = {
+                "signature": "def gg_probe():", "symbol": "x", "qualified_name": "x",
+                "symbols": [], "test": "x", "diff": "",
+                "source": "def gg_probe():\n    return 1\n", "line": 2,
+            }
+            for tool in tools:
+                result = await client.call_tool(tool.name, dict(args))
+                assert result.is_error is False, tool.name
+                assert result.structured_content == json.loads(result.content[0].text), tool.name
+
+    anyio.run(body)
+
+
+def test_lazy_server_operational_payloads_satisfy_the_output_schema(tmp_path: Path) -> None:
+    """The lazy server can answer a SUCCESSFUL call with a payload that is not the tool's dispatch
+    result — "which workspace?" errors, set_workspace activations, indexing progress. Once a tool
+    advertises an ``output_schema``, the SDK client validates those payloads against it too, so
+    each schema must also admit the operational shapes or every pre-resolution call breaks."""
+    import subprocess
+
+    repo = tmp_path / "proj"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "pkg" / "a.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, capture_output=True)
+
+    async def body() -> None:
+        async def _never_resolves(_session: object) -> None:
+            return None
+
+        server, _warm, _refresh = build_lazy_server(None, None, resolver=_never_resolves)
+        async with create_connected_server_and_client_session(server) as client:
+            # Unresolved: the "which workspace?" payload is a SUCCESS result — it must carry
+            # structured_content and pass the client's schema validation (operational branch).
+            res = await client.call_tool("find_cycles", {})
+            assert res.is_error is False
+            assert res.structured_content == json.loads(res.content[0].text)
+            assert res.structured_content["action"] == "set_workspace"
+
+            # set_workspace itself advertises a schema; its activation payload must conform.
+            activated = await client.call_tool("set_workspace", {"root": str(repo)})
+            assert activated.is_error is False
+            assert activated.structured_content == json.loads(activated.content[0].text)
+            assert activated.structured_content["ok"] is True
+
+            # And a served tool result on the lazy path dual-emits like the static server.
+            found = await client.call_tool("find_symbol", {"qualified_name": "proj.pkg.a.helper"})
+            assert found.structured_content == json.loads(found.content[0].text)
+            assert found.structured_content["found"] is True
+
+    anyio.run(body)
+
+
+def test_absurd_tool_name_is_rejected_without_flooding_the_log(caplog) -> None:  # type: ignore[no-untyped-def]
+    """The tool name is client-controlled and uncapped by the SDK, and ``dispatch`` embeds it in
+    its "unknown tool" error — which the traceback then renders into ``.cartogate/mcp.log``, an
+    unrotated file in the user's repo. Truncating at the log call is not enough (the traceback
+    reproduces it), so the name is bounded at entry: an agent looping on junk calls must not be
+    able to fill the disk."""
+    import logging
+
+    async def body() -> None:
+        server = build_server(_store())
+        async with create_connected_server_and_client_session(server) as client:
+            with caplog.at_level(logging.WARNING, logger="cartogate"):
+                res = await client.call_tool("N" * 200_000, {})
+            assert res.is_error is True
+            assert "too long" in res.content[0].text
+            emitted = "\n".join(r.getMessage() for r in caplog.records)
+            assert "N" * 1000 not in emitted, "the oversized name reached the log"
+
+    anyio.run(body)
+
+
+def test_contract_status_is_not_advertised_read_only() -> None:
+    """``contract_status`` answers by RUNNING the contract's declared ``run:`` checks — arbitrary
+    user shell commands — plus a ``git write-tree``. Hosts use ``read_only`` to AUTO-APPROVE tool
+    calls without prompting the user, so advertising this one read-only would let an agent be
+    made to run whatever a repo's contract declares, unattended. The behaviour this guards is
+    pinned in test_mcp_contract_tools.py; this asserts the advertised hints match it."""
+
+    async def body() -> None:
+        server = build_server(_store())
+        async with create_connected_server_and_client_session(server) as client:
+            by_name = {t.name: t for t in (await client.list_tools()).tools}
+            ann = by_name["contract_status"].annotations
+            assert ann is not None
+            assert ann.read_only_hint is False
+            assert ann.destructive_hint is True  # a declared check can be `make clean`
+            assert ann.idempotent_hint is False  # re-running has further effects
+            assert ann.open_world_hint is True  # a declared check can reach the network
+
+    anyio.run(body)
+
+
+def test_repeated_workspace_attach_does_not_stack_log_handlers(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """``set_workspace`` is advertised idempotent, so repeating it must have no ADDITIONAL effect.
+
+    Before this guard every call added another FileHandler for the same path: one leaked open fd
+    per call, and every later log line written once PER handler — so an agent that re-pointed at
+    its workspace three times got triplicated logs and three open files.
+    """
+    import logging
+
+    monkeypatch.delenv("CARTOGATE_LOG_FILE", raising=False)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        for _ in range(3):
+            mcp_server.attach_repo_log_file(tmp_path)
+        added = [h for h in root.handlers if h not in before]
+        assert len(added) == 1, f"stacked {len(added)} handlers for one log path"
+    finally:
+        for handler in list(root.handlers):
+            if handler not in before:
+                root.removeHandler(handler)
+                handler.close()
+
+
+def test_set_workspace_is_not_advertised_as_read_only() -> None:
+    """``set_workspace`` retargets the workspace and triggers an index — the one tool that changes
+    server state. Advertising it read-only would be a lie the agent acts on."""
+
+    async def body() -> None:
+        server, _warm, _refresh = build_lazy_server(None, None, resolver=None)
+        async with create_connected_server_and_client_session(server) as client:
+            by_name = {t.name: t for t in (await client.list_tools()).tools}
+            ann = by_name["set_workspace"].annotations
+            assert ann is not None
+            assert ann.read_only_hint is False
+            assert ann.destructive_hint is False  # retargets; deletes nothing
+            assert ann.idempotent_hint is True  # same root twice lands in the same state
+
+    anyio.run(body)
+
+
+def test_server_advertises_its_build_version_in_the_handshake() -> None:
+    """The handshake is the one place an agent (or a bug report) can see WHICH build answered.
+    The SDK defaults `version` to an empty string, which would silently drop the "an installed
+    build always identifies its exact commit" guarantee the rest of the tooling upholds."""
+
+    async def body() -> None:
+        server = build_server(_store())
+        async with create_connected_server_and_client_session(server) as client:
+            info = client.server_info
+            assert info is not None
+            assert info.version == cartogate.__version__
+            assert info.version, "empty version — the SDK default leaked through"
 
     anyio.run(body)
 
@@ -664,7 +947,7 @@ def test_static_server_schemas_have_no_workspace_root() -> None:
         async with create_connected_server_and_client_session(server) as client:
             listed = await client.list_tools()
             for tool in listed.tools:
-                assert "workspace_root" not in tool.inputSchema.get("properties", {})
+                assert "workspace_root" not in tool.input_schema.get("properties", {})
 
     anyio.run(body)
 
@@ -1046,9 +1329,8 @@ def test_server_answers_resources_and_prompts() -> None:
             listed = (await client.list_resources()).resources
             assert [str(r.uri) for r in listed] == ["cartogate://status"]
             # The static server serves the GENERIC status payload (no live workspace state).
-            from pydantic import AnyUrl
 
-            res = await client.read_resource(AnyUrl("cartogate://status"))
+            res = await client.read_resource("cartogate://status")
             payload = json.loads(res.contents[0].text)  # type: ignore[union-attr]
             assert payload["server"] == "cartogate" and "find_symbol" in payload["tools"]
             assert (await client.list_prompts()).prompts == []
@@ -1212,7 +1494,8 @@ def test_daemon_mode_forwards_tool_calls(monkeypatch, tmp_path: Path) -> None:
     def fake_query(repo, tool, arguments, *, timeout=2.0):  # type: ignore[no-untyped-def]
         seen["tool"] = tool
         seen["timeout"] = timeout
-        return {"forwarded": True, "tool": tool}
+        # Conforms to find_symbol's output_schema — the client validates stubbed answers too.
+        return {"found": False, "qualified_name": "x", "forwarded": True, "tool": tool}
 
     monkeypatch.setattr(daemon_client, "query", fake_query)
 
@@ -1229,7 +1512,7 @@ def test_daemon_mode_forwards_tool_calls(monkeypatch, tmp_path: Path) -> None:
         async with create_connected_server_and_client_session(server) as client:
             result = await client.call_tool("find_symbol", {"qualified_name": "x"})
             payload = json.loads(result.content[0].text)
-            assert payload == {"forwarded": True, "tool": "find_symbol"}
+            assert payload["forwarded"] is True and payload["tool"] == "find_symbol"
             assert seen["tool"] == "find_symbol"
             assert seen["timeout"] == mcp_server._DAEMON_QUERY_TIMEOUT  # generous, not 2s default
 
@@ -1288,3 +1571,125 @@ def _store_refresh():  # type: ignore[no-untyped-def]
             return None
 
     return _R()
+
+
+def test_roots_rung_is_quiet_and_survives_the_deprecated_era(tmp_path: Path) -> None:
+    """Stage 3 (SEP-2577): roots/list is deprecated with NO modern replacement — the
+    2026-07-28 era forbids server-initiated requests entirely. Cartogate keeps the rung
+    as a deliberate legacy-opportunistic signal (stdio only negotiates legacy protocol
+    versions, where it works and is the only zero-config per-window signal some editors
+    give). Two pins:
+
+    (a) a modern-era session (no back channel) falls through to the next rung quietly;
+    (b) the deliberate legacy request emits NO MCPDeprecationWarning — the rung issues
+        the raw request, not the SDK's @deprecated wrapper. Under a warnings-as-errors
+        regime a wrapper warning would ABORT the call inside the rung's broad except,
+        silently losing the roots signal; the repo must still resolve. (Doubles model
+        ``send_request`` — the transport seam the rung actually uses; the transport is
+        also what raises NoBackChannelError, below the deprecated wrapper.)
+    """
+    import subprocess
+    import warnings
+
+    from mcp.shared.exceptions import MCPDeprecationWarning, NoBackChannelError
+
+    repo = tmp_path / "proj"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, capture_output=True)
+
+    class _ModernSession:
+        async def send_request(self, request: object, result_type: object) -> object:
+            raise NoBackChannelError("modern era: no server-initiated requests")
+
+    class _LegacySession:
+        async def send_request(self, request: object, result_type: object) -> object:
+            assert isinstance(request, types.ListRootsRequest)
+            return types.ListRootsResult(roots=[types.Root(uri=repo.resolve().as_uri())])
+
+    async def body() -> None:
+        assert await mcp_server._repo_from_client_roots(_ModernSession()) is None
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", MCPDeprecationWarning)
+            resolved = await mcp_server._repo_from_client_roots(_LegacySession())
+        assert resolved == repo.resolve()
+
+    anyio.run(body)
+
+
+def test_the_text_channel_carries_the_same_payload_without_separator_spaces() -> None:
+    """Every success is sent twice: as JSON text for text-only hosts and as structured content
+    for schema-aware ones. A host that forwards the text pays for each character of it, so the
+    text is serialised without the spaces json.dumps puts after ',' and ':' by default."""
+
+    async def body() -> None:
+        server = build_server(_store())
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool(
+                "find_symbol", {"qualified_name": "sample_pkg.auth.authenticate"}
+            )
+
+            text = result.content[0].text
+            assert result.is_error is False
+            assert json.loads(text) == result.structured_content
+            assert text == json.dumps(result.structured_content, separators=(",", ":"))
+            assert '": ' not in text and '", "' not in text
+
+    anyio.run(body)
+
+
+def test_error_results_use_the_compact_text_form_too() -> None:
+    async def body() -> None:
+        server = build_server(_store())
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("no_such_tool", {})
+
+            assert result.is_error is True
+            text = result.content[0].text
+            assert text == json.dumps(json.loads(text), separators=(",", ":"))
+
+    anyio.run(body)
+
+
+@pytest.mark.parametrize(
+    "health",
+    [{}, {"surface": None}, {"surface": SURFACE_VERSION - 1}, {"surface": SURFACE_VERSION + 1}],
+)
+def test_a_daemon_serving_another_result_shape_is_replaced_at_the_same_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health: dict[str, object]
+) -> None:
+    """An editable install keeps its install-time version across a `git pull`, so a daemon that
+    started before a change to the tool results reports the SAME version as the new server. Its
+    old-shape results would be forwarded under the new advertised schemas and rejected by a
+    validating client. The daemon therefore reports the result shape it serves, and one that
+    reports another (or, like every daemon before this field existed, none) is replaced."""
+    import cartogate
+    from cartogate.daemon.discovery import DiscoveryInfo, write_discovery
+
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    write_discovery(
+        repo,
+        DiscoveryInfo(
+            host="127.0.0.1", port=1, pid=os.getpid(), token="t", repo=str(repo), resolve=True
+        ),
+    )
+    monkeypatch.setattr(
+        mcp_server.daemon_client,
+        "health",
+        lambda _r, **_k: {"version": cartogate.__version__, **health},
+    )
+    stopped: list[int] = []
+    monkeypatch.setattr(
+        mcp_server,
+        "_stop_daemon_process",
+        lambda pid, r: (stopped.append(pid), mcp_server.remove_discovery(r)),
+    )
+    spawned: list[Path] = []
+    monkeypatch.setattr(mcp_server, "_spawn_resolved_daemon", lambda r: spawned.append(r))
+
+    assert mcp_server._resolved_daemon_ready(repo) is False
+    assert stopped == [os.getpid()] and spawned == [repo]
+    # No thrash: the stale daemon's discovery is gone, so asking again replaces nothing.
+    assert mcp_server._resolved_daemon_ready(repo) is False
+    assert stopped == [os.getpid()] and spawned == [repo]

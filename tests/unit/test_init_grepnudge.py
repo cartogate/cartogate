@@ -83,3 +83,10 @@ def test_rule_has_grep_decision() -> None:
 def test_block_recovery_preserved() -> None:
     assert "--no-verify" in RULE_NUDGE
     assert RULE_NUDGE.rstrip().endswith("never bypass with `--no-verify`.")
+
+
+def test_rule_nudge_tells_the_agent_to_name_the_language() -> None:
+    """Without `language`, check_duplicate checks as Python and only reports (never blocks) a
+    match in another language. The installed rule is what makes agents pass it."""
+    assert "check_duplicate(signature, language)" in RULE_NUDGE
+    assert "check_duplicate(signature)" not in RULE_NUDGE

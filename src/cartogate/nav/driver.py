@@ -16,6 +16,7 @@ The adapter (PlaywrightDriver) resolves Target internally: tries role+name first
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -37,6 +38,16 @@ class Target:
     role: str | None = None
     name: str | None = None
     css: str | None = None
+
+
+def url_matched(pattern: str, url: str) -> bool:
+    """Whether ``url`` satisfies a ``Wait.url_matches`` pattern — REGEX search semantics.
+
+    The single implementation every adapter (and FakeDriver) imports, so a wait
+    behaves identically across drivers. Playwright's own ``wait_for_url`` treats a
+    plain string as a GLOB — adapters must route through this predicate instead.
+    """
+    return re.search(pattern, url) is not None
 
 
 @dataclass(frozen=True)

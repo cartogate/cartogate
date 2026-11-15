@@ -248,7 +248,7 @@ def _redirect_app_driver() -> FakeDriver:
 class TestStateResolver:
     def test_trailing_slash_variants_collapse_to_one_state(self) -> None:
         # /docs and /docs/ are the same page — one proposed state, not docs~2.
-        seed = [SimpleNamespace(id="home", url="/")]
+        seed = [SimpleNamespace(id="home", url="/", fragment=())]
         resolver = _StateResolver(seed)
         first_id, first_new = resolver.resolve("http://localhost/docs")
         second_id, second_new = resolver.resolve("http://localhost/docs/")
@@ -256,7 +256,7 @@ class TestStateResolver:
         assert first_new is True and second_new is False
 
     def test_root_variants_stay_root(self) -> None:
-        seed = [SimpleNamespace(id="home", url="/about")]
+        seed = [SimpleNamespace(id="home", url="/about", fragment=())]
         resolver = _StateResolver(seed)
         # "/" must not be stripped into an empty path.
         assert resolver.resolve("http://localhost/")[0] == "root"
@@ -357,3 +357,77 @@ class TestBudgets:
             budget=DiscoveryBudget(max_seconds=10.0), clock=lambda: next(ticks),
         )
         assert any("max_seconds" in h for h in report.budget_hits)
+
+
+class TestOriginNormalization:
+    """`localhost` and `localhost:80` are ONE origin. Unnormalized default ports
+    made them compare unequal, so a same-origin link spelled without the port
+    (or a redirect that drops it) was recorded as an off-origin dead-end."""
+
+    def test_default_ports_normalize_to_the_same_origin(self) -> None:
+        from cartogate.nav.discover import _origin
+
+        assert _origin("http://localhost/") == _origin("http://localhost:80/x")
+        assert _origin("https://localhost/") == _origin("https://localhost:443/x")
+
+    def test_distinct_ports_and_schemes_stay_distinct(self) -> None:
+        from cartogate.nav.discover import _origin
+
+        assert _origin("http://localhost:8000/") != _origin("http://localhost/")
+        assert _origin("http://localhost:443/") != _origin("https://localhost/")
+        assert _origin("http://localhost/") != _origin("https://localhost/")
+
+
+class TestStateLevelProvenance:
+    """A discovered state must be marked crawled AT THE STATE LEVEL, not only on its
+    landmarks/affordances — the reviewer merging a proposal keys trust off the state's own
+    provenance, and the schema defaults an unmarked state to 'extracted' on reload."""
+
+    def test_proposed_states_carry_crawled_provenance(self, tmp_path: Path) -> None:
+        seed = _write_seed(tmp_path)
+        crawl_discover(seed, _app_driver(), base_url=BASE, budget=DiscoveryBudget())
+        doc = json.loads((tmp_path / "navmap.proposed.json").read_text(encoding="utf-8"))
+        by_id = {s["id"]: s for s in doc["states"]}
+        assert by_id["docs"]["provenance"] == "crawled"
+        assert by_id["docs.guide"]["provenance"] == "crawled"
+
+    def test_seed_echo_round_trips_state_provenance(self, tmp_path: Path) -> None:
+        # A seed state explicitly marked 'declared' must not be silently re-labelled
+        # by the echo (the schema would default a dropped key back to 'extracted').
+        seed_doc = json.loads(json.dumps(SEED_MAP))
+        seed_doc["states"][0]["provenance"] = "declared"
+        path = tmp_path / "navmap.json"
+        path.write_text(json.dumps(seed_doc), encoding="utf-8")
+        crawl_discover(path, _app_driver(), base_url=BASE, budget=DiscoveryBudget())
+        doc = json.loads((tmp_path / "navmap.proposed.json").read_text(encoding="utf-8"))
+        by_id = {s["id"]: s for s in doc["states"]}
+        assert by_id["home"]["provenance"] == "declared"
+
+
+class TestFragmentDistinctSeeds:
+    """Seed matching mirrors the runtime's fragment semantics (subset match, most
+    fragment pairs first). Route-only matching collapsed declared fragment-distinct
+    states (`/viz#v=a` vs `/viz#v=b`) onto whichever pattern happened to sort first."""
+
+    def test_fragment_declared_seeds_resolve_distinctly(self) -> None:
+        seed = [
+            SimpleNamespace(id="viz.a", url="/viz#v=a", fragment=(("v", "a"),)),
+            SimpleNamespace(id="viz.b", url="/viz#v=b", fragment=(("v", "b"),)),
+            SimpleNamespace(id="viz", url="/viz", fragment=()),
+        ]
+        resolver = _StateResolver(seed)
+        assert resolver.resolve("http://localhost/viz#v=b") == ("viz.b", False)
+        assert resolver.resolve("http://localhost/viz#v=a") == ("viz.a", False)
+        # No declared pair matches -> the fragmentless (most general) state wins.
+        assert resolver.resolve("http://localhost/viz#v=zz") == ("viz", False)
+        assert resolver.resolve("http://localhost/viz") == ("viz", False)
+
+    def test_new_state_equivalence_stays_route_only(self) -> None:
+        # Deliberate asymmetry: fragments distinguish states only when the map's
+        # author DECLARED them. Minting per-fragment states for undeclared pages
+        # would explode on scroll anchors (#intro, #usage, ...).
+        seed = [SimpleNamespace(id="home", url="/", fragment=())]
+        resolver = _StateResolver(seed)
+        first = resolver.resolve("http://localhost/docs#intro")
+        second = resolver.resolve("http://localhost/docs#usage")
+        assert first[0] == second[0]

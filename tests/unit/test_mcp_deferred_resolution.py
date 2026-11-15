@@ -24,7 +24,8 @@ from cartogate.store import InMemoryStore
 
 
 class _FakeSession:
-    """Stands in for an MCP ServerSession — only ``list_roots`` / ``client_params`` are used."""
+    """Stands in for an MCP ServerSession — only ``send_request`` / ``client_params`` are
+    used (the roots rung issues the RAW request; the deprecated wrapper is skipped)."""
 
     client_params = None
 
@@ -32,7 +33,7 @@ class _FakeSession:
         self._uris = root_uris or []
         self._raises = raises
 
-    async def list_roots(self) -> object:
+    async def send_request(self, request: object, result_type: object) -> object:
         if self._raises:
             raise RuntimeError("client does not support roots")
         return SimpleNamespace(roots=[SimpleNamespace(uri=u) for u in self._uris])
@@ -99,7 +100,7 @@ def test_roots_times_out_on_a_hung_client(monkeypatch) -> None:  # type: ignore[
     class _Hang:
         client_params = None
 
-        async def list_roots(self) -> object:
+        async def send_request(self, request: object, result_type: object) -> object:
             await anyio.sleep(5)  # never answers within the (patched) timeout
             return SimpleNamespace(roots=[])
 

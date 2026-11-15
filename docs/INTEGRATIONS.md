@@ -39,12 +39,21 @@ ladder**, so nothing is hardcoded and multiple open projects each get their own 
 1. an explicit pin (`cartogate-mcp <path>` or `CARTOGATE_REPO`) — optional;
 2. the agent's own signal — the `workspace_root` parameter every tool accepts, or the
    `set_workspace` tool (the always-on rule teaches agents to send it);
-3. the editor's MCP workspace roots, where the editor provides real ones;
+3. the editor's MCP workspace roots, where the editor provides real ones (a legacy MCP
+   capability — deprecated upstream with no replacement, kept as an opportunistic rung;
+   the durable signals are 1, 2, and 4);
 4. the workspace registry — a previously-activated repo whose daemon is still running is an
    unambiguous anchor when it is the only one.
 
 In practice: run `cartogate init` once per repo and subsequent editor sessions resolve
 automatically.
+
+Every tool advertises a typed **`outputSchema`**, and every successful result is dual-emitted:
+the JSON text block plus matching **`structuredContent`**. Schema-aware clients (mcp SDK ≥ 2.x
+validates automatically) get typed results; text-only clients see the same payload unchanged.
+While the server is still resolving a workspace or indexing, tools can return an *operational*
+payload instead of their normal shape — an object carrying `ok`/`status`/`note` or
+`error`/`action` — which the advertised schemas also admit; follow the `note`/`action` and retry.
 
 Each agent registers that command in its own config. **Mind the JSON key** — it differs by agent:
 most use `mcpServers`, but **VS Code uses `servers`**.
@@ -79,7 +88,7 @@ instead, give the **absolute path** to the binary (e.g.
 - **Missing MCP SDK (rare now — it's a base dependency).** A *complete* install always has it. Only
   a partial/broken install would make `cartogate-mcp` print `cartogate-mcp needs the MCP SDK, which
   isn't installed` and exit non-zero (so an agent shows it dead). Fix as it says:
-  `pipx inject cartogate 'mcp>=1.2,<2'`, or just reinstall.
+  `pipx inject cartogate 'mcp>=2,<3'`, or just reinstall.
 - **First start indexes in the background.** The server answers the handshake immediately and builds
   the graph on connect; the *first tool call* may wait for that build on a large repo. The server is
   alive throughout — it is no longer marked dead by a slow initial index.
